@@ -21,10 +21,16 @@ static const struct {
 
 /*****************************************************************************/
 
-#define CMD_ATM_READY	0x22
+#define CMD_ATM_READY		0x22
+#define CMD_SEC_GET_NAME	'G'	/* read filename */
 
-#define CTL_DATA_BUS	0x55	/* refers to data bus controller */
-#define CTL_ADDR_BUS	0xAA	/* .. address bus .. */
+/* bus controllers */
+#define CTL_DATA_BUS	0x55
+#define CTL_ADDR_BUS	0xAA
+
+#define FILENAME_ROM0	0
+#define FILENAME_ROM1	1
+#define FILENAME_RAM	2
 
 typedef struct {
 	u8 magic[4];
@@ -42,7 +48,7 @@ typedef struct {
 			u8 num_pages;
 		} rom_rw;
 		struct {
-			u8 position;
+			u8 which;
 		} filename;
 		struct {
 			u8 times_cmd;
@@ -67,7 +73,7 @@ static void prepare_cmd(dev_cmd_t *dev_cmd, u8 cmd)
 	memset(dev_cmd, 0, sizeof(*dev_cmd));
 
 	memcpy(dev_cmd->magic, "USBC", 4);
-	dev_cmd->magic2 = 0x67; /* "MySCSICommand" */
+	dev_cmd->magic2 = 0x67; /* MySCSICommand, EXCOMMAND */
 	dev_cmd->mx_cmd = cmd;
 }
 
@@ -93,6 +99,58 @@ static int read_response(struct usb_dev_handle *dev, void *buff, int size)
 		printf("read_response: read only %d of %d bytes\n", ret, size);
 
 	return ret;
+}
+
+static int read_info(struct usb_dev_handle *device, u8 ctl_id)
+{
+	dev_cmd_t cmd;
+	dev_info_t info;
+	int ret;
+
+	prepare_cmd(&cmd, CMD_ATM_READY);
+	cmd.dev_info.which_device = ctl_id;
+	memset(&info, 0, sizeof(info));
+
+	ret = write_cmd(device, &cmd);
+	if (ret < 0)
+		return ret;
+
+	ret = read_response(device, &info, sizeof(info));
+	if (ret < 0)
+		return ret;
+	
+	printf(" firmware version:   %X.%X.%X%c\n", info.firmware_ver[0],
+		info.firmware_ver[1], info.firmware_ver[2], info.firmware_ver[3]);
+	printf(" bootloader version: %X.%X.%X%c\n", info.bootloader_ver[0],
+		info.bootloader_ver[1], info.bootloader_ver[2], info.bootloader_ver[3]);
+	info.names[sizeof(info.names) - 1] = 0;
+	printf(" device name:        %s\n", info.names);
+
+	return 0;
+}
+
+static int get_filename(struct usb_dev_handle *dev, char *dst, int len, u8 which)
+{
+	char buff[65];
+	dev_cmd_t cmd;
+	int ret;
+
+	prepare_cmd(&cmd, CMD_SEC_GET_NAME);
+	cmd.filename.which = which;
+	memset(buff, 0, sizeof(buff));
+
+	ret = write_cmd(dev, &cmd);
+	if (ret < 0)
+		return ret;
+
+	ret = read_response(dev, buff, 64);
+	if (ret < 0)
+		return ret;
+
+	strncpy(dst, buff, len);
+	dst[len - 1] = 0;
+
+	return 0;
 }
 
 static usb_dev_handle *get_device(void)
@@ -160,33 +218,6 @@ found:
 	return handle;
 }
 
-static int read_info(struct usb_dev_handle *device, u8 ctl_id)
-{
-	dev_cmd_t cmd;
-	dev_info_t info;
-	int ret;
-
-	prepare_cmd(&cmd, CMD_ATM_READY);
-	cmd.dev_info.which_device = ctl_id;
-
-	ret = write_cmd(device, &cmd);
-	if (ret < 0)
-		return ret;
-
-	ret = read_response(device, &info, sizeof(info));
-	if (ret < 0)
-		return ret;
-	
-	printf("firmware version:   %X.%X.%X%c\n", info.firmware_ver[0],
-		info.firmware_ver[1], info.firmware_ver[2], info.firmware_ver[3]);
-	printf("bootloader version: %X.%X.%X%c\n", info.bootloader_ver[0],
-		info.bootloader_ver[1], info.bootloader_ver[2], info.bootloader_ver[3]);
-	info.names[sizeof(info.names) - 1] = 0;
-	printf("device name:        %s\n", info.names);
-
-	return 0;
-}
-
 static void release_device(struct usb_dev_handle *device)
 {
 	usb_release_interface(device, 0);
@@ -196,6 +227,7 @@ static void release_device(struct usb_dev_handle *device)
 int main(int argc, char *argv[])
 {
 	struct usb_dev_handle *device;
+	char fname[65];
 	int ret;
 
 	usb_init();
@@ -213,6 +245,17 @@ int main(int argc, char *argv[])
 	ret = read_info(device, CTL_ADDR_BUS);
 	if (ret < 0)
 		goto end;
+
+	ret = get_filename(device, fname, sizeof(fname), FILENAME_ROM0);
+	if (ret < 0)
+		goto end;
+	printf("ROM filename:  %s\n", fname);
+
+	ret = get_filename(device, fname, sizeof(fname), FILENAME_RAM);
+	if (ret < 0)
+		goto end;
+	printf("SRAM filename: %s\n", fname);
+
 
 
 end:
