@@ -19,7 +19,9 @@ static const struct {
 	{ 0x03eb, 0x202d, "32MX+UF Game Device" },
 };
 
-/*****************************************************************************/
+#define VERSION			"0.8"
+
+#define IO_BLK_SIZE		0x2000	/* 8K */
 
 #define CMD_ATM_READY		0x22
 #define CMD_SEC_GET_NAME	'G'	/* filename r/w */
@@ -28,6 +30,7 @@ static const struct {
 #define CMD_SEC_ERASE		'E'
 #define CMD_SEC_READY		'C'	/* is flash ready? */
 #define CMD_SEC_READ		'R'
+#define CMD_SEC_WRITE		'W'
 
 /* bus controllers */
 #define CTL_DATA_BUS	0x55
@@ -53,10 +56,11 @@ typedef struct {
 			u8 which_device;
 		} dev_info;
 		struct {
-			u8 addrb2;	/* most significant */
+			u8 addrb2;	/* most significant (BE) */
 			u8 addrb1;
 			u8 addrb0;
-			u8 packets;	/* 64 byte usb packets */
+			u8 param;	/* 64 byte usb packets for i/o */
+			u8 param2;
 		} rom_rw;
 		struct {
 			u8 which;
@@ -64,7 +68,7 @@ typedef struct {
 		struct {
 			u8 cmd;
 			u8 action;
-			u8 b0;
+			u8 b0;		/* LE */
 			u8 b1;
 			u8 b2;
 			u8 b3;
@@ -150,9 +154,11 @@ static int read_data(struct usb_dev_handle *dev, void *buff, int size)
 	if (ret < 0) {
 		fprintf(stderr, "failed to read:\n");
 		fprintf(stderr, "%s (%d)\n", usb_strerror(), ret);
-	} else if (ret != size)
+	}
+/*
+	else if (ret != size)
 		printf("read_data: read only %d of %d bytes\n", ret, size);
-
+*/
 	return ret;
 }
 
@@ -248,7 +254,7 @@ static int write_filename(struct usb_dev_handle *dev, const char *fname, u8 whic
 	return write_data(dev, buff, len + 1);
 }
 
-static int read_w_counter(struct usb_dev_handle *dev, u32 *val)
+static int read_erase_counter(struct usb_dev_handle *dev, u32 *val)
 {
 	dev_info_t dummy_info;
 	dev_cmd_t cmd;
@@ -339,23 +345,142 @@ static int get_page_size(const page_table_t *table, u32 addr, u32 *size)
 	}
 
 	if (addr == t[-1].end_addr + 1)
-		return 1;	/* last */
+		return 1;	/* no more */
 	
 	fprintf(stderr, "get_page_size: failed on addr %06x\n", addr);
 	return -1;
 }
 
-static int erase_page(struct usb_dev_handle *dev, u32 addr)
+/* limitations:
+ * - bytes must be multiple of 64
+ * - bytes must be less than 16k
+ * - must perform even number of reads, or dev hangs on exit (firmware bug?) */
+static int rw_rom_block(struct usb_dev_handle *dev, u32 addr, void *buffer, int bytes, int is_w)
 {
 	dev_cmd_t cmd;
-	u8 buff[10];
+	int ret;
+
+	prepare_cmd(&cmd, is_w ? CMD_SEC_WRITE : CMD_SEC_READ);
+	cmd.write_flag = is_w ? 1 : 0;
+	cmd.rom_rw.addrb2 = addr >> (16 + 1);
+	cmd.rom_rw.addrb1 = addr >> (8 + 1);
+	cmd.rom_rw.addrb0 = addr >> 1;
+	cmd.rom_rw.param = bytes / 64;
+	cmd.rom_rw.param2 = is_w ? 1 : 0; /* ? */
+
+	ret = write_cmd(dev, &cmd);
+	if (ret < 0)
+		return ret;
+
+	bytes &= ~63;
+
+	if (is_w)
+		ret = write_data(dev, buffer, bytes);
+	else
+		ret = read_data(dev, buffer, bytes);
+	if (ret < 0)
+		return ret;
+
+	if (ret != bytes)
+		fprintf(stderr, "rw_rom_block warning: done only %d/%d bytes\n", ret, bytes);
+
+	return ret;
+}
+
+static int read_write_rom(struct usb_dev_handle *dev, u32 addr, void *buffer, int bytes, int is_write)
+{
+	int total_bytes = bytes;
+	u8 *buff = buffer;
+	u8 dummy[64 * 4];
+	int count, ret;
+
+	if (addr & 1)
+		fprintf(stderr, "read_write_rom: can't handle odd address %06x, "
+				"LSb will be ignored\n", addr);
+	if (bytes & 63)
+		fprintf(stderr, "read_write_rom: byte count must be multiple of 64, "
+				"last %d bytes will not be handled\n", bytes & 63);
+
+	printf("%s flash ROM...\n", is_write ? "writing to" : "reading");
+
+	/* do i/o in blocks */
+	for (count = 0; bytes >= IO_BLK_SIZE; count++) {
+		print_progress(buff - (u8 *)buffer, total_bytes);
+
+		ret = rw_rom_block(dev, addr, buff, IO_BLK_SIZE, is_write);
+		if (ret < 0)
+			return ret;
+		buff += IO_BLK_SIZE;
+		addr += IO_BLK_SIZE;
+		bytes -= IO_BLK_SIZE;
+	}
+	print_progress(buff - (u8 *)buffer, total_bytes);
+
+	ret = 0;
+	if (bytes != 0) {
+		ret = rw_rom_block(dev, addr, buff, bytes, is_write);
+		count++;
+		print_progress(total_bytes, total_bytes);
+	}
+
+	if (count & 1)
+		/* work around read_rom_block() limitation 3 */
+		rw_rom_block(dev, 0, dummy, sizeof(dummy), 0);
+
+	printf("\n");
+	return ret;
+}
+
+static int increment_erase_cnt(struct usb_dev_handle *dev)
+{
+	dev_cmd_t cmd;
+	u8 buff[4];
+	u32 cnt;
+	int ret;
+
+	ret = read_erase_counter(dev, &cnt);
+	if (ret != 0)
+		return ret;
+
+	if (cnt == (u32)-1) {
+		fprintf(stderr, "flash erase counter maxed out!\n");
+		fprintf(stderr, "(wow, did you really erase so many times?)\n");
+		return -1;
+	}
+
+	cnt++;
+
+	prepare_cmd(&cmd, CMD_ATM_READY);
+	cmd.write_cnt.cmd = W_COUNTER;
+	cmd.write_cnt.action = W_CNT_WRITE;
+	cmd.write_cnt.b3 = cnt >> 24;
+	cmd.write_cnt.b2 = cnt >> 16;
+	cmd.write_cnt.b1 = cnt >> 8;
+	cmd.write_cnt.b0 = cnt;
+
+	ret = write_cmd(dev, &cmd);
+	if (ret < 0)
+		return ret;
+
+	ret = read_data(dev, buff, sizeof(buff));
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+
+static int erase_page(struct usb_dev_handle *dev, u32 addr, int whole)
+{
+	dev_cmd_t cmd;
+	u8 buff[5];
 	int i, ret;
 
 	prepare_cmd(&cmd, CMD_SEC_ERASE);
 	cmd.write_flag = 1;
-	cmd.rom_rw.addrb2 = addr >> 16;
-	cmd.rom_rw.addrb1 = addr >> 8;
-	cmd.rom_rw.addrb0 = addr;
+	cmd.rom_rw.addrb2 = addr >> (16 + 1);
+	cmd.rom_rw.addrb1 = addr >> (8 + 1);
+	cmd.rom_rw.addrb0 = addr >> 1;
+	cmd.rom_rw.param = whole ? 0x10 : 0;
 
 	ret = write_cmd(dev, &cmd);
 	if (ret < 0)
@@ -366,9 +491,9 @@ static int erase_page(struct usb_dev_handle *dev, u32 addr)
 		return ret;
 	
 	prepare_cmd(&cmd, CMD_SEC_READY);
-	cmd.rom_rw.addrb2 = addr >> 16;
-	cmd.rom_rw.addrb1 = addr >> 8;
-	cmd.rom_rw.addrb0 = addr;
+	cmd.rom_rw.addrb2 = addr >> (16 + 1);
+	cmd.rom_rw.addrb1 = addr >> (8 + 1);
+	cmd.rom_rw.addrb0 = addr >> 1;
 
 	for (i = 0; i < 100; i++) {
 		ret = write_cmd(dev, &cmd);
@@ -382,86 +507,148 @@ static int erase_page(struct usb_dev_handle *dev, u32 addr)
 		if (ret > 4 && buff[4] == 1)
 			break;
 
-		usleep(50);
+		usleep((whole ? 600 : 20) * 1000);
 	}
 
-	printf("i = %d\n", i);
+	if (i == 100) {
+		fprintf(stderr, "\ntimeout waiting for erase to complete\n");
+		return -1;
+	}
+
 	return 0;
 }
 
-/* limitations:
- * - bytes must be multiple of 64
- * - bytes must be less than 16k
- * - must perform even number of reads (firmware bug?) */
-static int read_rom_block(struct usb_dev_handle *dev, u32 addr, void *buffer, int bytes)
+static int erase_seq(struct usb_dev_handle *dev, u32 size)
 {
-	dev_cmd_t cmd;
-	int ret;
+	const page_table_t *table;
+	u32 addr, page_size = 0;
+	u32 rom0_id, rom1_id;
+	int count, ret;
 
-	prepare_cmd(&cmd, CMD_SEC_READ);
-	cmd.rom_rw.addrb2 = addr >> (16 + 1);
-	cmd.rom_rw.addrb1 = addr >> (8 + 1);
-	cmd.rom_rw.addrb0 = addr >> 1;
-	cmd.rom_rw.packets = bytes / 64;
-
-	ret = write_cmd(dev, &cmd);
+	ret = read_flash_rom_id(dev, 0, &rom0_id);
 	if (ret < 0)
 		return ret;
 
-	bytes &= ~63;
-	ret = read_data(dev, buffer, bytes);
+	ret = read_flash_rom_id(dev, 1, &rom1_id);
 	if (ret < 0)
 		return ret;
-	if (ret != bytes)
-		fprintf(stderr, "read_rom_block warning: read only %d/%d bytes\n", ret, bytes);
+
+	if (rom0_id != rom1_id)
+		fprintf(stderr, "Warning: flash ROM ids differ: %08x %08x\n",
+			rom0_id, rom1_id);
+
+ 	table = get_page_table(rom0_id);
+	if (table == NULL)
+		return -1;
+
+	printf("erasing flash...\n");
+
+	ret = increment_erase_cnt(dev);
+	if (ret != 0)
+		fprintf(stderr, "warning: coun't increase erase counter\n");
+
+	for (addr = 0, count = 0; addr < size; addr += page_size, count++) {
+		print_progress(addr, size);
+
+		ret = erase_page(dev, addr, 0);
+		if (ret < 0)
+			return ret;
+
+		ret = get_page_size(table, addr, &page_size);
+		if (ret != 0)
+			break;
+	}
+
+	if (count & 1)
+		/* ??? */
+		/* must submit even number of erase commands (fw bug?) */
+		erase_page(dev, 0, 0);
+
+	print_progress(addr, size);
+	printf("\n");
 
 	return ret;
 }
 
-#define READ_BLK_SIZE (0x2000)	/* 8K */
-
-static int read_rom(struct usb_dev_handle *dev, u32 addr, void *buffer, int bytes)
+static int erase_all(struct usb_dev_handle *dev, u32 size)
 {
-	int total_bytes = bytes;
-	u8 *buff = buffer;
-	u8 dummy[64 * 4];
-	int count, ret;
+	int ret;
 
-	if (addr & 1)
-		fprintf(stderr, "read_rom: can't handle odd address %06x, "
-				"LSb will be ignored\n", addr);
-	if (bytes & 63)
-		fprintf(stderr, "read_rom: byte count must be multiple of 64, "
-				"last %d bytes will not be read\n", bytes & 63);
+	printf("erasing flash0...");
+	fflush(stdout);
 
-	printf("reading flash ROM...\n");
+	ret = increment_erase_cnt(dev);
+	if (ret != 0)
+		fprintf(stderr, "warning: couldn't increase erase counter\n");
 
-	/* read in blocks */
-	for (count = 0; bytes >= READ_BLK_SIZE; count++) {
-		print_progress(buff - (u8 *)buffer, total_bytes);
+	ret = erase_page(dev, 0xaaa, 1);
+	if (ret != 0)
+		return ret;
 
-		ret = read_rom_block(dev, addr, buff, READ_BLK_SIZE);
-		if (ret < 0)
-			return ret;
-		buff += READ_BLK_SIZE;
-		addr += READ_BLK_SIZE;
-		bytes -= READ_BLK_SIZE;
-	}
-	print_progress(buff - (u8 *)buffer, total_bytes);
+	if (size > 0x200000) {
+		printf(" done.\n");
+		printf("erasing flash1...");
+		fflush(stdout);
 
-	ret = 0;
-	if (bytes != 0) {
-		ret = read_rom_block(dev, addr, buff, bytes);
-		count++;
-		print_progress(total_bytes, total_bytes);
+		ret = erase_page(dev, 0x200aaa, 1);
 	}
 
-	if (count & 1)
-		/* work around read_rom_block() limitation 3 */
-		read_rom_block(dev, 0, dummy, sizeof(dummy));
-
-	printf("\n");
+	printf(" done.\n");
 	return ret;
+}
+
+static int print_device_info(struct usb_dev_handle *dev)
+{
+	u32 counter, rom0_id, rom1_id;
+	dev_info_t info;
+	int ret;
+
+	printf("data bus controller:\n");
+	ret = read_info(dev, CTL_DATA_BUS, &info);
+	if (ret < 0)
+		return ret;
+	printf_info(&info);
+
+	printf("address bus controller:\n");
+	ret = read_info(dev, CTL_ADDR_BUS, &info);
+	if (ret < 0)
+		return ret;
+	printf_info(&info);
+
+	ret = read_erase_counter(dev, &counter);
+	if (ret < 0)
+		return ret;
+	printf("flash erase count:   %u\n", counter);
+
+	ret = read_flash_rom_id(dev, 0, &rom0_id);
+	if (ret < 0)
+		return ret;
+	printf("flash rom0 id:       %08x\n", rom0_id);
+
+	ret = read_flash_rom_id(dev, 1, &rom1_id);
+	if (ret < 0)
+		return ret;
+	printf("flash rom1 id:       %08x\n", rom1_id);
+
+	return 0;
+}
+
+static int print_game_info(struct usb_dev_handle *dev)
+{
+	char fname[65];
+	int ret;
+
+	ret = read_filename(dev, fname, sizeof(fname), FILENAME_ROM0);
+	if (ret < 0)
+		return ret;
+	printf("ROM filename:  %s\n", fname);
+
+	ret = read_filename(dev, fname, sizeof(fname), FILENAME_RAM);
+	if (ret < 0)
+		return ret;
+	printf("SRAM filename: %s\n", fname);
+
+	return 0;
 }
 
 static usb_dev_handle *get_device(void)
@@ -535,14 +722,115 @@ static void release_device(struct usb_dev_handle *device)
 	usb_close(device);
 }
 
+static void usage(const char *app_name)
+{
+	printf("Flasher tool for MX game devices\n"
+		"written by Grazvydas \"notaz\" Ignotas\n");
+	printf("v" VERSION " (" __DATE__ ")\n\n");
+	printf("Usage:\n"
+		"%s [-i] [-g] [-e] [-r [file]] [-w <file>]\n"
+		"  -i         print some info about connected device\n"
+		"  -g         print some info about game ROM inside device\n"
+		"  -e         erase whole flash ROM in device\n"
+		"  -f         use different erase method\n"
+		"  -r [file]  copy game image from device to file; can autodetect filename\n"
+		"  -w <file>  write file to device\n"
+		"  -v         with -w: verify written file\n",
+		app_name);
+}
+
 int main(int argc, char *argv[])
 {
+	int pr_dev_info = 0, pr_rom_info = 0, do_erase_size = 0;
+	int erase_method = 0, do_read = 0, do_verify = 0;
 	struct usb_dev_handle *device;
-	char fname[65];
-	u32 counter, rom0_id, rom1_id;
-	dev_info_t info;
-	char *buff;
-	int ret;
+	char *r_fname = NULL, *w_fname = NULL;
+	void *r_fdata = NULL, *w_fdata = NULL;
+	char r_fname_buff[65];
+	FILE *file = NULL;
+	int file_size = 0;
+	int i, ret = 0;
+
+	for (i = 1; i < argc; i++)
+	{
+		if (argv[i][0] != '-')
+			break;
+
+		switch (argv[i][1]) {
+		case 'i':
+			pr_dev_info = 1;
+			break;
+		case 'g':
+			pr_rom_info = 1;
+			break;
+		case 'e':
+			do_erase_size = 0x400000;
+			break;
+		case 'f':
+			erase_method = 1;
+			break;
+		case 'v':
+			do_verify = 1;
+			break;
+		case 'r':
+			do_read = 1;
+			if (argv[i+1] && (argv[i+1][0] != '-' || argv[i+1][2] != ' '))
+				r_fname = argv[++i];
+			break;
+		case 'w':
+			if (argv[i+1] && (argv[i+1][0] != '-' || argv[i+1][2] != ' '))
+				w_fname = argv[++i];
+			else
+				goto breakloop;
+			break;
+		default:
+			goto breakloop;
+		}
+	}
+
+breakloop:
+	if (i <= 1 || i < argc) {
+		usage(argv[0]);
+		return 1;
+	}
+
+	if (w_fname != NULL) {
+		file = fopen(w_fname, "rb");
+		if (file == NULL) {
+			fprintf(stderr, "can't open file: %s\n", w_fname);
+			return 1;
+		}
+		fseek(file, 0, SEEK_END);
+		file_size = ftell(file);
+		fseek(file, 0, SEEK_SET);
+		if (file_size > 0x400000)
+			fprintf(stderr, "warning: input file too large\n");
+		if (file_size < 0) {
+			fprintf(stderr, "bad/empty file: %s\n", w_fname);
+			fclose(file);
+			return 1;
+		}
+
+		w_fdata = malloc(file_size);
+		if (w_fdata == NULL) {
+			fprintf(stderr, "low memory\n");
+			fclose(file);
+			return 1;
+		}
+
+		ret = fread(w_fdata, 1, file_size, file);
+		fclose(file);
+		if (ret != file_size) {
+			fprintf(stderr, "failed to read file: %s\n", w_fname);
+			return 1;
+		}
+
+		if (do_erase_size < file_size)
+			do_erase_size = file_size;
+	} else if (do_verify) {
+		fprintf(stderr, "warning: -w not specified, -v ignored.\n");
+		do_verify = 0;
+	}
 
 	usb_init();
 
@@ -550,60 +838,97 @@ int main(int argc, char *argv[])
 	if (device == NULL)
 		return 1;
 
-	printf("data bus controller:\n");
-	ret = read_info(device, CTL_DATA_BUS, &info);
-	if (ret < 0)
-		goto end;
-	printf_info(&info);
-
-	printf("address bus controller:\n");
-	ret = read_info(device, CTL_ADDR_BUS, &info);
-	if (ret < 0)
-		goto end;
-	printf_info(&info);
-
-	ret = read_filename(device, fname, sizeof(fname), FILENAME_ROM0);
-	if (ret < 0)
-		goto end;
-	printf("ROM filename:  %s\n", fname);
-
-	ret = read_filename(device, fname, sizeof(fname), FILENAME_RAM);
-	if (ret < 0)
-		goto end;
-	printf("SRAM filename: %s\n", fname);
-
-	ret = read_w_counter(device, &counter);
-	if (ret < 0)
-		goto end;
-	printf("flash writes:  %u\n", counter);
-
-	ret = read_flash_rom_id(device, 0, &rom0_id);
-	if (ret < 0)
-		goto end;
-	printf("flash rom0 id: %08x\n", rom0_id);
-
-	ret = read_flash_rom_id(device, 1, &rom1_id);
-	if (ret < 0)
-		goto end;
-	printf("flash rom1 id: %08x\n", rom1_id);
-
-	if (rom0_id != rom1_id)
-		fprintf(stderr, "Warning: flash ROM ids differ: %08x %08x\n",
-			rom0_id, rom1_id);
- 
-#define XSZ (0x400000)
-	buff = malloc(XSZ);
-	ret = read_rom(device, 0, buff, XSZ);
-	if (ret < 0)
-		goto end;
-	{
-		FILE *f = fopen("dump", "wb");
-		fwrite(buff, 1, XSZ, f);
-		fclose(f);
+	if (pr_dev_info) {
+		ret = print_device_info(device);
+		if (ret < 0)
+			goto end;
 	}
 
+	if (pr_rom_info) {
+		ret = print_game_info(device);
+		if (ret < 0)
+			goto end;
+	}
+
+	/* erase */
+	if (do_erase_size != 0) {
+		if (erase_method)
+			ret = erase_all(device, do_erase_size);
+		else
+			ret = erase_seq(device, do_erase_size);
+		if (ret < 0)
+			goto end;
+	}
+
+	/* write */
+	if (w_fdata != NULL) {
+		char *p;
+
+		ret = read_write_rom(device, 0, w_fdata, file_size, 1);
+		if (ret < 0)
+			goto end;
+
+		p = strrchr(w_fname, '/');
+		if (p == NULL)
+			p = w_fname;
+		else
+			p++;
+
+		ret = write_filename(device, p, FILENAME_ROM0);
+		if (ret < 0)
+			fprintf(stderr, "warning: failed to save ROM filename\n");
+	}
+
+	/* read, verify */
+	if (do_read && r_fname == NULL) {
+		ret = read_filename(device, r_fname_buff, sizeof(r_fname_buff), FILENAME_ROM0);
+		if (ret < 0)
+			return ret;
+		r_fname = r_fname_buff;
+		if (r_fname[0] == 0)
+			r_fname = "rom.gen";
+	}
+
+	if (r_fname != NULL || do_verify) {
+		r_fdata = malloc(0x400000);
+		if (r_fdata == NULL) {
+			fprintf(stderr, "low mem\n");
+			goto end;
+		}
+
+		ret = read_write_rom(device, 0, r_fdata, 0x400000, 0);
+		if (ret < 0)
+			goto end;
+	}
+
+	if (do_verify) {
+		ret = memcmp(w_fdata, r_fdata, file_size);
+		if (ret == 0)
+			printf("verification passed.\n");
+		else
+			printf("verification failed!\n");
+	}
+
+	if (r_fname != NULL) {
+		file = fopen(r_fname, "wb");
+		if (file == NULL) {
+			fprintf(stderr, "can't open for writing: %s\n", r_fname);
+			goto end;
+		}
+		ret = fwrite(r_fdata, 1, 0x400000, file);
+		fclose(file);
+		if (ret != 0x400000)
+			fprintf(stderr, "write failed to %s\n", r_fname);
+		else
+			printf("saved to %s\n", r_fname);
+	}
 
 end:
+	if (w_fdata != NULL)
+		free(w_fdata);
+	if (r_fdata != NULL)
+		free(r_fdata);
+
 	release_device(device);
 
 	return ret;
