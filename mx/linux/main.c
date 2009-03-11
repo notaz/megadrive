@@ -27,6 +27,7 @@ static const struct {
 #define CMD_SEC_DEVID		'L'	/* read flash device ID */
 #define CMD_SEC_ERASE		'E'
 #define CMD_SEC_READY		'C'	/* is flash ready? */
+#define CMD_SEC_READ		'R'
 
 /* bus controllers */
 #define CTL_DATA_BUS	0x55
@@ -47,7 +48,7 @@ typedef struct {
 	u8 reserved2[2];
 	u8 magic2;
 	u8 mx_cmd;
-	union {
+	union {				/* 0x11 */
 		struct {
 			u8 which_device;
 		} dev_info;
@@ -55,7 +56,7 @@ typedef struct {
 			u8 addrb2;	/* most significant */
 			u8 addrb1;
 			u8 addrb0;
-			u8 num_pages;
+			u8 packets;	/* 64 byte usb packets */
 		} rom_rw;
 		struct {
 			u8 which;
@@ -102,6 +103,19 @@ static const page_table_t p_AM29LV320DT[] =
 	{ 0x000000, 0x000000, 0x000000 },
 };
 
+static const page_table_t p_2x_16[] =
+{
+	{ 0x000000, 0x003fff, 0x004000 },
+	{ 0x004000, 0x007fff, 0x002000 },
+	{ 0x008000, 0x00ffff, 0x008000 },
+	{ 0x010000, 0x1fffff, 0x010000 },
+	{ 0x200000, 0x203fff, 0x004000 },
+	{ 0x204000, 0x207fff, 0x002000 },
+	{ 0x208000, 0x20ffff, 0x008000 },
+	{ 0x210000, 0x3fffff, 0x010000 },
+	{ 0x000000, 0x000000, 0x000000 },
+};
+
 /*****************************************************************************/
 
 static void prepare_cmd(dev_cmd_t *dev_cmd, u8 cmd)
@@ -142,32 +156,50 @@ static int read_data(struct usb_dev_handle *dev, void *buff, int size)
 	return ret;
 }
 
-static int read_info(struct usb_dev_handle *device, u8 ctl_id)
+static int read_info(struct usb_dev_handle *device, u8 ctl_id, dev_info_t *info)
 {
 	dev_cmd_t cmd;
-	dev_info_t info;
 	int ret;
 
 	prepare_cmd(&cmd, CMD_ATM_READY);
 	cmd.dev_info.which_device = ctl_id;
-	memset(&info, 0, sizeof(info));
+	memset(info, 0, sizeof(*info));
 
 	ret = write_cmd(device, &cmd);
 	if (ret < 0)
 		return ret;
 
-	ret = read_data(device, &info, sizeof(info));
+	ret = read_data(device, info, sizeof(*info));
 	if (ret < 0)
 		return ret;
 	
-	printf(" firmware version:   %X.%X.%X%c\n", info.firmware_ver[0],
-		info.firmware_ver[1], info.firmware_ver[2], info.firmware_ver[3]);
-	printf(" bootloader version: %X.%X.%X%c\n", info.bootloader_ver[0],
-		info.bootloader_ver[1], info.bootloader_ver[2], info.bootloader_ver[3]);
-	info.names[sizeof(info.names) - 1] = 0;
-	printf(" device name:        %s\n", info.names);
-
 	return 0;
+}
+
+static void printf_info(dev_info_t *info)
+{
+	printf(" firmware version:   %X.%X.%X%c\n", info->firmware_ver[0],
+		info->firmware_ver[1], info->firmware_ver[2], info->firmware_ver[3]);
+	printf(" bootloader version: %X.%X.%X%c\n", info->bootloader_ver[0],
+		info->bootloader_ver[1], info->bootloader_ver[2], info->bootloader_ver[3]);
+	info->names[sizeof(info->names) - 1] = 0;
+	printf(" device name:        %s\n", info->names);
+}
+
+static void print_progress(u32 done, u32 total)
+{
+	int i, step;
+
+	printf("\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b");
+	printf("\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b"); /* 20 */
+	printf("\b\b\b\b\b\b");
+	printf("%06x/%06x |", done, total);
+
+	step = total / 20;
+	for (i = step; i <= total; i += step)
+		printf("%c", done >= i ? '=' : '-');
+	printf("| %3d%%", done * 100 / total);
+	fflush(stdout);
 }
 
 static int read_filename(struct usb_dev_handle *dev, char *dst, int len, u8 which)
@@ -218,9 +250,16 @@ static int write_filename(struct usb_dev_handle *dev, const char *fname, u8 whic
 
 static int read_w_counter(struct usb_dev_handle *dev, u32 *val)
 {
+	dev_info_t dummy_info;
 	dev_cmd_t cmd;
-	u8 buff[16];
+	u8 buff[4];
 	int ret;
+
+	/* must perform dummy info read here,
+	 * or else device hangs after close (firmware bug?) */
+	ret = read_info(dev, CTL_DATA_BUS, &dummy_info);
+	if (ret < 0)
+		return ret;
 
 	prepare_cmd(&cmd, CMD_ATM_READY);
 	cmd.write_cnt.cmd = W_COUNTER;
@@ -233,21 +272,20 @@ static int read_w_counter(struct usb_dev_handle *dev, u32 *val)
 	ret = read_data(dev, buff, sizeof(buff));
 	if (ret < 0)
 		return ret;
-	
+
 	*val = *(u32 *)buff;
 	return 0;
 }
 
-static int read_flash_rom_id(struct usb_dev_handle *dev, u32 *val)
+static int read_flash_rom_id(struct usb_dev_handle *dev, int is_second, u32 *val)
 {
 	dev_cmd_t cmd;
 	u8 buff[2];
 	int ret;
 
 	prepare_cmd(&cmd, CMD_SEC_DEVID);
-	cmd.write_flag = 1;			/* XXX why? */
-	cmd.rom_id.dev_id = 1;
-	cmd.rom_id.which = 0;
+	cmd.rom_id.which = is_second ? 0x10 : 0;
+	cmd.rom_id.dev_id = 0;
 
 	ret = write_cmd(dev, &cmd);
 	if (ret < 0)
@@ -259,7 +297,7 @@ static int read_flash_rom_id(struct usb_dev_handle *dev, u32 *val)
 
 	*val = *(u16 *)buff << 16;
 
-	cmd.rom_id.which = 0;
+	cmd.rom_id.dev_id = 1;
 	ret = write_cmd(dev, &cmd);
 	if (ret < 0)
 		return ret;
@@ -279,6 +317,9 @@ static const page_table_t *get_page_table(u32 rom_id)
 		return p_AM29LV320DB;
 	case 0x0100F422:
 		return p_AM29LV320DT;
+	case 0x01004922:
+	case 0xC2004922:
+		return p_2x_16;
 	default:
 		fprintf(stderr, "unrecognized ROM id: %08x\n", rom_id);
 	}
@@ -304,7 +345,7 @@ static int get_page_size(const page_table_t *table, u32 addr, u32 *size)
 	return -1;
 }
 
-static int erase_sector(struct usb_dev_handle *dev, u32 addr)
+static int erase_page(struct usb_dev_handle *dev, u32 addr)
 {
 	dev_cmd_t cmd;
 	u8 buff[10];
@@ -346,6 +387,81 @@ static int erase_sector(struct usb_dev_handle *dev, u32 addr)
 
 	printf("i = %d\n", i);
 	return 0;
+}
+
+/* limitations:
+ * - bytes must be multiple of 64
+ * - bytes must be less than 16k
+ * - must perform even number of reads (firmware bug?) */
+static int read_rom_block(struct usb_dev_handle *dev, u32 addr, void *buffer, int bytes)
+{
+	dev_cmd_t cmd;
+	int ret;
+
+	prepare_cmd(&cmd, CMD_SEC_READ);
+	cmd.rom_rw.addrb2 = addr >> (16 + 1);
+	cmd.rom_rw.addrb1 = addr >> (8 + 1);
+	cmd.rom_rw.addrb0 = addr >> 1;
+	cmd.rom_rw.packets = bytes / 64;
+
+	ret = write_cmd(dev, &cmd);
+	if (ret < 0)
+		return ret;
+
+	bytes &= ~63;
+	ret = read_data(dev, buffer, bytes);
+	if (ret < 0)
+		return ret;
+	if (ret != bytes)
+		fprintf(stderr, "read_rom_block warning: read only %d/%d bytes\n", ret, bytes);
+
+	return ret;
+}
+
+#define READ_BLK_SIZE (0x2000)	/* 8K */
+
+static int read_rom(struct usb_dev_handle *dev, u32 addr, void *buffer, int bytes)
+{
+	int total_bytes = bytes;
+	u8 *buff = buffer;
+	u8 dummy[64 * 4];
+	int count, ret;
+
+	if (addr & 1)
+		fprintf(stderr, "read_rom: can't handle odd address %06x, "
+				"LSb will be ignored\n", addr);
+	if (bytes & 63)
+		fprintf(stderr, "read_rom: byte count must be multiple of 64, "
+				"last %d bytes will not be read\n", bytes & 63);
+
+	printf("reading flash ROM...\n");
+
+	/* read in blocks */
+	for (count = 0; bytes >= READ_BLK_SIZE; count++) {
+		print_progress(buff - (u8 *)buffer, total_bytes);
+
+		ret = read_rom_block(dev, addr, buff, READ_BLK_SIZE);
+		if (ret < 0)
+			return ret;
+		buff += READ_BLK_SIZE;
+		addr += READ_BLK_SIZE;
+		bytes -= READ_BLK_SIZE;
+	}
+	print_progress(buff - (u8 *)buffer, total_bytes);
+
+	ret = 0;
+	if (bytes != 0) {
+		ret = read_rom_block(dev, addr, buff, bytes);
+		count++;
+		print_progress(total_bytes, total_bytes);
+	}
+
+	if (count & 1)
+		/* work around read_rom_block() limitation 3 */
+		read_rom_block(dev, 0, dummy, sizeof(dummy));
+
+	printf("\n");
+	return ret;
 }
 
 static usb_dev_handle *get_device(void)
@@ -423,7 +539,9 @@ int main(int argc, char *argv[])
 {
 	struct usb_dev_handle *device;
 	char fname[65];
-	u32 counter, rom_id;
+	u32 counter, rom0_id, rom1_id;
+	dev_info_t info;
+	char *buff;
 	int ret;
 
 	usb_init();
@@ -433,14 +551,16 @@ int main(int argc, char *argv[])
 		return 1;
 
 	printf("data bus controller:\n");
-	ret = read_info(device, CTL_DATA_BUS);
+	ret = read_info(device, CTL_DATA_BUS, &info);
 	if (ret < 0)
 		goto end;
+	printf_info(&info);
 
 	printf("address bus controller:\n");
-	ret = read_info(device, CTL_ADDR_BUS);
+	ret = read_info(device, CTL_ADDR_BUS, &info);
 	if (ret < 0)
 		goto end;
+	printf_info(&info);
 
 	ret = read_filename(device, fname, sizeof(fname), FILENAME_ROM0);
 	if (ret < 0)
@@ -457,10 +577,31 @@ int main(int argc, char *argv[])
 		goto end;
 	printf("flash writes:  %u\n", counter);
 
-	ret = read_flash_rom_id(device, &rom_id);
+	ret = read_flash_rom_id(device, 0, &rom0_id);
 	if (ret < 0)
 		goto end;
-	printf("flash rom id:  %08x\n", rom_id);
+	printf("flash rom0 id: %08x\n", rom0_id);
+
+	ret = read_flash_rom_id(device, 1, &rom1_id);
+	if (ret < 0)
+		goto end;
+	printf("flash rom1 id: %08x\n", rom1_id);
+
+	if (rom0_id != rom1_id)
+		fprintf(stderr, "Warning: flash ROM ids differ: %08x %08x\n",
+			rom0_id, rom1_id);
+ 
+#define XSZ (0x400000)
+	buff = malloc(XSZ);
+	ret = read_rom(device, 0, buff, XSZ);
+	if (ret < 0)
+		goto end;
+	{
+		FILE *f = fopen("dump", "wb");
+		fwrite(buff, 1, XSZ, f);
+		fclose(f);
+	}
+
 
 end:
 	release_device(device);

@@ -1,5 +1,5 @@
 
 CC ?= $(CROSS)gcc
 
-CFLAGS += -Wall -ggdb
+CFLAGS += -Wall -ggdb -Wno-unused-function
 LDFLAGS += -lusb
