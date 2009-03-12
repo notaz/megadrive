@@ -22,6 +22,7 @@ static const struct {
 #define VERSION			"0.8"
 
 #define IO_BLK_SIZE		0x2000	/* 8K */
+#define IO_RAM_BLK_SIZE		256
 
 #define CMD_ATM_READY		0x22
 #define CMD_SEC_GET_NAME	'G'	/* filename r/w */
@@ -31,6 +32,8 @@ static const struct {
 #define CMD_SEC_READY		'C'	/* is flash ready? */
 #define CMD_SEC_READ		'R'
 #define CMD_SEC_WRITE		'W'
+#define CMD_SEC_RAM_READ	'D'
+#define CMD_SEC_RAM_WRITE	'U'
 
 /* bus controllers */
 #define CTL_DATA_BUS	0x55
@@ -355,18 +358,20 @@ static int get_page_size(const page_table_t *table, u32 addr, u32 *size)
  * - bytes must be multiple of 64
  * - bytes must be less than 16k
  * - must perform even number of reads, or dev hangs on exit (firmware bug?) */
-static int rw_rom_block(struct usb_dev_handle *dev, u32 addr, void *buffer, int bytes, int is_w)
+static int rw_dev_block(struct usb_dev_handle *dev, u32 addr, void *buffer, int bytes, int mx_cmd)
 {
 	dev_cmd_t cmd;
 	int ret;
 
-	prepare_cmd(&cmd, is_w ? CMD_SEC_WRITE : CMD_SEC_READ);
-	cmd.write_flag = is_w ? 1 : 0;
+	prepare_cmd(&cmd, mx_cmd);
+	if (mx_cmd == CMD_SEC_WRITE || mx_cmd == CMD_SEC_RAM_WRITE)
+		cmd.write_flag = 1;
 	cmd.rom_rw.addrb2 = addr >> (16 + 1);
 	cmd.rom_rw.addrb1 = addr >> (8 + 1);
 	cmd.rom_rw.addrb0 = addr >> 1;
 	cmd.rom_rw.param = bytes / 64;
-	cmd.rom_rw.param2 = is_w ? 1 : 0; /* ? */
+	if (mx_cmd == CMD_SEC_WRITE || mx_cmd == CMD_SEC_RAM_WRITE)
+		cmd.rom_rw.param2 = 1; /* ? */
 
 	ret = write_cmd(dev, &cmd);
 	if (ret < 0)
@@ -374,7 +379,7 @@ static int rw_rom_block(struct usb_dev_handle *dev, u32 addr, void *buffer, int 
 
 	bytes &= ~63;
 
-	if (is_w)
+	if (mx_cmd == CMD_SEC_WRITE || mx_cmd == CMD_SEC_RAM_WRITE)
 		ret = write_data(dev, buffer, bytes);
 	else
 		ret = read_data(dev, buffer, bytes);
@@ -382,13 +387,14 @@ static int rw_rom_block(struct usb_dev_handle *dev, u32 addr, void *buffer, int 
 		return ret;
 
 	if (ret != bytes)
-		fprintf(stderr, "rw_rom_block warning: done only %d/%d bytes\n", ret, bytes);
+		fprintf(stderr, "rw_dev_block warning: done only %d/%d bytes\n", ret, bytes);
 
 	return ret;
 }
 
 static int read_write_rom(struct usb_dev_handle *dev, u32 addr, void *buffer, int bytes, int is_write)
 {
+	int mx_cmd = is_write ? CMD_SEC_WRITE : CMD_SEC_READ;
 	int total_bytes = bytes;
 	u8 *buff = buffer;
 	u8 dummy[64 * 4];
@@ -407,7 +413,7 @@ static int read_write_rom(struct usb_dev_handle *dev, u32 addr, void *buffer, in
 	for (count = 0; bytes >= IO_BLK_SIZE; count++) {
 		print_progress(buff - (u8 *)buffer, total_bytes);
 
-		ret = rw_rom_block(dev, addr, buff, IO_BLK_SIZE, is_write);
+		ret = rw_dev_block(dev, addr, buff, IO_BLK_SIZE, mx_cmd);
 		if (ret < 0)
 			return ret;
 		buff += IO_BLK_SIZE;
@@ -418,17 +424,50 @@ static int read_write_rom(struct usb_dev_handle *dev, u32 addr, void *buffer, in
 
 	ret = 0;
 	if (bytes != 0) {
-		ret = rw_rom_block(dev, addr, buff, bytes, is_write);
+		ret = rw_dev_block(dev, addr, buff, bytes, mx_cmd);
 		count++;
 		print_progress(total_bytes, total_bytes);
 	}
 
 	if (count & 1)
-		/* work around read_rom_block() limitation 3 */
-		rw_rom_block(dev, 0, dummy, sizeof(dummy), 0);
+		/* work around rw_dev_block() limitation 3 (works for reads only?) */
+		rw_dev_block(dev, 0, dummy, sizeof(dummy), 0);
 
 	printf("\n");
 	return ret;
+}
+
+static int read_write_ram(struct usb_dev_handle *dev, void *buffer, int bytes, int is_write)
+{
+	int mx_cmd = is_write ? CMD_SEC_RAM_WRITE : CMD_SEC_RAM_READ;
+	int total_bytes = bytes;
+	u8 *buff = buffer;
+	u32 addr = 0x200000;
+	int ret = 0;
+
+	if (bytes % IO_RAM_BLK_SIZE)
+		fprintf(stderr, "read_write_ram: byte count must be multiple of %d, "
+				"last %d bytes will not be handled\n", IO_RAM_BLK_SIZE,
+				bytes % IO_RAM_BLK_SIZE);
+
+	printf("%s RAM...\n", is_write ? "writing to" : "reading");
+
+	/* do i/o in blocks */
+	while (bytes >= IO_RAM_BLK_SIZE) {
+		print_progress(buff - (u8 *)buffer, total_bytes);
+
+		ret = rw_dev_block(dev, addr, buff, IO_RAM_BLK_SIZE, mx_cmd);
+		if (ret < 0)
+			return ret;
+		buff += IO_RAM_BLK_SIZE;
+		addr += IO_RAM_BLK_SIZE;
+		bytes -= IO_RAM_BLK_SIZE;
+	}
+	print_progress(buff - (u8 *)buffer, total_bytes);
+
+	printf("\n");
+	return ret;
+
 }
 
 static int increment_erase_cnt(struct usb_dev_handle *dev)
@@ -651,6 +690,71 @@ static int print_game_info(struct usb_dev_handle *dev)
 	return 0;
 }
 
+static int read_file(const char *fname, void **buff_out, int *size, int limit)
+{
+	int file_size, ret;
+	void *data;
+	FILE *file;
+
+	file = fopen(fname, "rb");
+	if (file == NULL) {
+		fprintf(stderr, "can't open file: %s\n", fname);
+		return -1;
+	}
+
+	fseek(file, 0, SEEK_END);
+	file_size = ftell(file);
+	fseek(file, 0, SEEK_SET);
+	if (file_size > limit)
+		fprintf(stderr, "warning: input file \"%s\" too large\n", fname);
+	if (file_size < 0) {
+		fprintf(stderr, "bad/empty file: %s\n", fname);
+		goto fail;
+	}
+
+	data = malloc(file_size);
+	if (data == NULL) {
+		fprintf(stderr, "low memory\n");
+		goto fail;
+	}
+
+	ret = fread(data, 1, file_size, file);
+	if (ret != file_size) {
+		fprintf(stderr, "failed to read file: %s\n", fname);
+		goto fail;
+	}
+
+	*buff_out = data;
+	*size = file_size;
+	fclose(file);
+	return 0;
+
+fail:
+	fclose(file);
+	return -1;
+}
+
+static int write_file(const char *fname, void *buff, int size)
+{
+	FILE *file;
+	int ret;
+
+	file = fopen(fname, "wb");
+	if (file == NULL) {
+		fprintf(stderr, "can't open for writing: %s\n", fname);
+		return -1;
+	}
+
+	ret = fwrite(fname, 1, size, file);
+	fclose(file);
+	if (ret != size)
+		fprintf(stderr, "write failed to %s\n", fname);
+	else
+		printf("saved to %s.\n", fname);
+	
+	return 0;
+}
+
 static usb_dev_handle *get_device(void)
 {
 	struct usb_dev_handle *handle;
@@ -728,27 +832,30 @@ static void usage(const char *app_name)
 		"written by Grazvydas \"notaz\" Ignotas\n");
 	printf("v" VERSION " (" __DATE__ ")\n\n");
 	printf("Usage:\n"
-		"%s [-i] [-g] [-e] [-r [file]] [-w <file>]\n"
+		"%s [-i] [-g] [-e] [-r [file]] [-w <file>] ...\n"
 		"  -i         print some info about connected device\n"
 		"  -g         print some info about game ROM inside device\n"
-		"  -e         erase whole flash ROM in device\n"
-		"  -f         use different erase method\n"
+		"  -e[1]      erase whole flash ROM in device, '1' uses different erase method\n"
+		"  -f         skip file check\n"
 		"  -r [file]  copy game image from device to file; can autodetect filename\n"
-		"  -w <file>  write file to device\n"
-		"  -v         with -w: verify written file\n",
+		"  -w <file>  write file to device; also does erase\n"
+		"  -sr [file] read save RAM to file\n"
+		"  -sw <file> write save RAM file to device\n"
+		"  -sc        clear save RAM\n"
+		"  -v         with -w or -sw: verify written file\n",
 		app_name);
 }
 
 int main(int argc, char *argv[])
 {
-	int pr_dev_info = 0, pr_rom_info = 0, do_erase_size = 0;
-	int erase_method = 0, do_read = 0, do_verify = 0;
+	char *r_fname = NULL, *w_fname = NULL, *sr_fname = NULL, *sw_fname = NULL;
+	void *r_fdata = NULL, *w_fdata = NULL, *sr_fdata = NULL, *sw_fdata = NULL;
+	int do_read_ram = 0, do_clear_ram = 0, do_verify = 0, do_check = 1;
+	int pr_dev_info = 0, pr_rom_info = 0, do_read = 0;
+	int erase_method = 0, do_erase_size = 0;
+	int w_fsize = 0, sw_fsize = 0;
 	struct usb_dev_handle *device;
-	char *r_fname = NULL, *w_fname = NULL;
-	void *r_fdata = NULL, *w_fdata = NULL;
-	char r_fname_buff[65];
-	FILE *file = NULL;
-	int file_size = 0;
+	char fname_buff[65];
 	int i, ret = 0;
 
 	for (i = 1; i < argc; i++)
@@ -765,24 +872,45 @@ int main(int argc, char *argv[])
 			break;
 		case 'e':
 			do_erase_size = 0x400000;
+			if (argv[i][2] == '1')
+				erase_method = 1;
 			break;
 		case 'f':
-			erase_method = 1;
+			do_check = 0;
 			break;
 		case 'v':
 			do_verify = 1;
 			break;
 		case 'r':
 			do_read = 1;
-			if (argv[i+1] && (argv[i+1][0] != '-' || argv[i+1][2] != ' '))
+			if (argv[i+1] && argv[i+1][0] != '-')
 				r_fname = argv[++i];
 			break;
 		case 'w':
-			if (argv[i+1] && (argv[i+1][0] != '-' || argv[i+1][2] != ' '))
+			if (argv[i+1] && argv[i+1][0] != '-')
 				w_fname = argv[++i];
 			else
 				goto breakloop;
 			break;
+		case 's':
+			switch (argv[i][2]) {
+			case 'r':
+				do_read_ram = 1;
+				if (argv[i+1] && argv[i+1][0] != '-')
+					sr_fname = argv[++i];
+				break;
+			case 'w':
+				if (argv[i+1] && argv[i+1][0] != '-')
+					sw_fname = argv[++i];
+				else
+					goto breakloop;
+				break;
+			case 'c':
+				do_clear_ram = 1;
+				break;
+			default:
+				/* fall though */;
+			}
 		default:
 			goto breakloop;
 		}
@@ -794,50 +922,55 @@ breakloop:
 		return 1;
 	}
 
+	/* preparations */
 	if (w_fname != NULL) {
-		file = fopen(w_fname, "rb");
-		if (file == NULL) {
-			fprintf(stderr, "can't open file: %s\n", w_fname);
-			return 1;
-		}
-		fseek(file, 0, SEEK_END);
-		file_size = ftell(file);
-		fseek(file, 0, SEEK_SET);
-		if (file_size > 0x400000)
-			fprintf(stderr, "warning: input file too large\n");
-		if (file_size < 0) {
-			fprintf(stderr, "bad/empty file: %s\n", w_fname);
-			fclose(file);
+		/* check extension */
+		ret = strlen(w_fname);
+		if (do_check && (w_fname[ret - 4] == '.' || w_fname[ret - 3] == '.' ||
+				w_fname[ret - 2] == '.') &&
+				strcasecmp(&w_fname[ret - 4], ".gen") != 0 &&
+				strcasecmp(&w_fname[ret - 4], ".bin") != 0) {
+			fprintf(stderr, "\"%s\" doesn't look like a game ROM, aborting "
+					"(use -f to disable this check)\n", w_fname);
 			return 1;
 		}
 
-		w_fdata = malloc(file_size);
-		if (w_fdata == NULL) {
-			fprintf(stderr, "low memory\n");
-			fclose(file);
+		ret = read_file(w_fname, &w_fdata, &w_fsize, 0x400000);
+		if (ret < 0)
 			return 1;
-		}
 
-		ret = fread(w_fdata, 1, file_size, file);
-		fclose(file);
-		if (ret != file_size) {
-			fprintf(stderr, "failed to read file: %s\n", w_fname);
+		if (do_erase_size < w_fsize)
+			do_erase_size = w_fsize;
+	}
+	if (sw_fname != NULL) {
+		ret = read_file(sw_fname, &sw_fdata, &sw_fsize, 0x8000);
+		if (ret < 0)
 			return 1;
+	}
+	if (sw_fdata != NULL || do_clear_ram) {
+		if (sw_fsize < 0x8000) {
+			sw_fdata = realloc(sw_fdata, 0x8000);
+			if (sw_fdata == NULL) {
+				fprintf(stderr, "low mem\n");
+				return 1;
+			}
+			memset((u8 *)sw_fdata + sw_fsize, 0, 0x8000 - sw_fsize);
 		}
-
-		if (do_erase_size < file_size)
-			do_erase_size = file_size;
-	} else if (do_verify) {
-		fprintf(stderr, "warning: -w not specified, -v ignored.\n");
+		sw_fsize = 0x8000;
+	}
+	if (w_fname == NULL && sw_fname == NULL && do_verify) {
+		fprintf(stderr, "warning: -w or -sw not specified, -v ignored.\n");
 		do_verify = 0;
 	}
 
+	/* init */
 	usb_init();
 
 	device = get_device();
 	if (device == NULL)
 		return 1;
 
+	/* info */
 	if (pr_dev_info) {
 		ret = print_device_info(device);
 		if (ret < 0)
@@ -860,31 +993,57 @@ breakloop:
 			goto end;
 	}
 
-	/* write */
+	/* write flash */
 	if (w_fdata != NULL) {
 		char *p;
 
-		ret = read_write_rom(device, 0, w_fdata, file_size, 1);
+		ret = read_write_rom(device, 0, w_fdata, w_fsize, 1);
 		if (ret < 0)
 			goto end;
 
 		p = strrchr(w_fname, '/');
-		if (p == NULL)
-			p = w_fname;
-		else
-			p++;
+		p = (p == NULL) ? w_fname : p + 1;
 
 		ret = write_filename(device, p, FILENAME_ROM0);
 		if (ret < 0)
 			fprintf(stderr, "warning: failed to save ROM filename\n");
 	}
 
-	/* read, verify */
+	/* write ram */
+	if (sw_fdata != NULL) {
+		char *p, *t;
+
+		ret = read_write_ram(device, sw_fdata, sw_fsize, 1);
+		if (ret < 0)
+			goto end;
+
+		memset(fname_buff, 0, sizeof(fname_buff));
+		p = fname_buff;
+		if (sw_fname != NULL) {
+			p = strrchr(sw_fname, '/');
+			p = (p == NULL) ? sw_fname : p + 1;
+		} else if (w_fname != NULL) {
+			t = strrchr(w_fname, '/');
+			t = (t == NULL) ? w_fname : t + 1;
+
+			strncpy(fname_buff, t, sizeof(fname_buff));
+			fname_buff[sizeof(fname_buff) - 1] = 0;
+			ret = strlen(fname_buff);
+			if (ret > 4 && fname_buff[ret - 4] == '.')
+				strcpy(&fname_buff[ret - 4], ".srm");
+		}
+
+		ret = write_filename(device, p, FILENAME_RAM);
+		if (ret < 0)
+			fprintf(stderr, "warning: failed to save RAM filename\n");
+	}
+
+	/* read flash */
 	if (do_read && r_fname == NULL) {
-		ret = read_filename(device, r_fname_buff, sizeof(r_fname_buff), FILENAME_ROM0);
+		ret = read_filename(device, fname_buff, sizeof(fname_buff), FILENAME_ROM0);
 		if (ret < 0)
 			return ret;
-		r_fname = r_fname_buff;
+		r_fname = fname_buff;
 		if (r_fname[0] == 0)
 			r_fname = "rom.gen";
 	}
@@ -901,27 +1060,53 @@ breakloop:
 			goto end;
 	}
 
-	if (do_verify) {
-		ret = memcmp(w_fdata, r_fdata, file_size);
-		if (ret == 0)
-			printf("verification passed.\n");
-		else
-			printf("verification failed!\n");
+	if (r_fname != NULL)
+		write_file(r_fname, r_fdata, 0x400000);
+
+	/* read ram */
+	if (do_read_ram && sr_fname == NULL) {
+		ret = read_filename(device, fname_buff, sizeof(fname_buff), FILENAME_RAM);
+		if (ret < 0)
+			return ret;
+		sr_fname = fname_buff;
+		if (sr_fname[0] == 0)
+			sr_fname = "rom.srm";
 	}
 
-	if (r_fname != NULL) {
-		file = fopen(r_fname, "wb");
-		if (file == NULL) {
-			fprintf(stderr, "can't open for writing: %s\n", r_fname);
+	if (sr_fname != NULL || do_verify) {
+		sr_fdata = malloc(0x8000);
+		if (sr_fdata == NULL) {
+			fprintf(stderr, "low mem\n");
 			goto end;
 		}
-		ret = fwrite(r_fdata, 1, 0x400000, file);
-		fclose(file);
-		if (ret != 0x400000)
-			fprintf(stderr, "write failed to %s\n", r_fname);
-		else
-			printf("saved to %s\n", r_fname);
+
+		ret = read_write_ram(device, sr_fdata, 0x400000, 0);
+		if (ret < 0)
+			goto end;
 	}
+
+	if (sr_fname != NULL)
+		write_file(sr_fname, sr_fdata, 0x400000);
+
+	/* verify */
+	if (do_verify && w_fdata != NULL && r_fdata != NULL) {
+		ret = memcmp(w_fdata, r_fdata, w_fsize);
+		if (ret == 0)
+			printf("flash verification passed.\n");
+		else
+			printf("flash verification FAILED!\n");
+	}
+
+	if (do_verify && sw_fdata != NULL && sr_fdata != NULL) {
+		ret = memcmp(sw_fdata, sr_fdata, 0x8000);
+		if (ret == 0)
+			printf("RAM verification passed.\n");
+		else
+			printf("RAM verification FAILED!\n");
+	}
+
+	printf("all done.\n");
+	ret = 0;
 
 end:
 	if (w_fdata != NULL)
