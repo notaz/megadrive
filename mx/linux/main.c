@@ -53,9 +53,11 @@ static const struct {
  * checkboxes use 0x41 0x42 0x43 (?)
  * r,w Ram/ROM uses 0x23/0x21
  */
-#define C_RAM_OFF	0x21	/* RAM always off */
-#define C_RAM_SWITCH	0x22	/* RAM switched by game */
-#define C_RAM_ON	0x23
+#define C_RAM_OFF	0x41	/* RAM always off */
+#define C_RAM_SWITCH	0x42	/* RAM switched by game */
+#define C_RAM_ON	0x43
+#define C_RAM_TMP_OFF	0x21
+#define C_RAM_TMP_ON	0x23
 
 typedef struct {
 	u8 magic[4];
@@ -439,7 +441,7 @@ static int read_write_rom(struct usb_dev_handle *dev, u32 addr, void *buffer, in
 		fprintf(stderr, "read_write_rom: byte count must be multiple of 64, "
 				"last %d bytes will not be handled\n", bytes & 63);
 
-	set_ram_mode(dev, C_RAM_OFF);
+	set_ram_mode(dev, C_RAM_TMP_OFF);
 
 	printf("%s flash ROM...\n", is_write ? "writing to" : "reading");
 
@@ -477,14 +479,14 @@ static int read_write_ram(struct usb_dev_handle *dev, void *buffer, int bytes, i
 	int total_bytes = bytes;
 	u8 *buff = buffer;
 	u32 addr = 0x200000;
-	int ret = 0;
+	int i, ret = 0;
 
 	if (bytes % IO_RAM_BLK_SIZE)
 		fprintf(stderr, "read_write_ram: byte count must be multiple of %d, "
 				"last %d bytes will not be handled\n", IO_RAM_BLK_SIZE,
 				bytes % IO_RAM_BLK_SIZE);
 
-	set_ram_mode(dev, C_RAM_ON);
+	set_ram_mode(dev, C_RAM_TMP_ON);
 
 	printf("%s RAM...\n", is_write ? "writing to" : "reading");
 
@@ -500,6 +502,10 @@ static int read_write_ram(struct usb_dev_handle *dev, void *buffer, int bytes, i
 		bytes -= IO_RAM_BLK_SIZE;
 	}
 	print_progress(buff - (u8 *)buffer, total_bytes);
+
+	/* only D0-D7 connected.. */
+	for (i = 0; i < total_bytes; i += 2)
+		((u8 *)buffer)[i] = 0;
 
 	printf("\n");
 	return ret;
@@ -541,7 +547,7 @@ static int increment_erase_cnt(struct usb_dev_handle *dev)
 	if (ret < 0)
 		return ret;
 
-	return 0;
+	return cnt;
 }
 
 static int erase_page(struct usb_dev_handle *dev, u32 addr, int whole)
@@ -616,11 +622,11 @@ static int erase_seq(struct usb_dev_handle *dev, u32 size)
 	if (table == NULL)
 		return -1;
 
-	printf("erasing flash...\n");
-
 	ret = increment_erase_cnt(dev);
-	if (ret != 0)
+	if (ret < 0)
 		fprintf(stderr, "warning: coun't increase erase counter\n");
+
+	printf("erasing flash... (erase count=%u)\n", ret);
 
 	for (addr = 0, count = 0; addr < size; addr += page_size, count++) {
 		print_progress(addr, size);
@@ -649,12 +655,12 @@ static int erase_all(struct usb_dev_handle *dev, u32 size)
 {
 	int ret;
 
-	printf("erasing flash0...");
-	fflush(stdout);
-
 	ret = increment_erase_cnt(dev);
-	if (ret != 0)
+	if (ret < 0)
 		fprintf(stderr, "warning: couldn't increase erase counter\n");
+
+	printf("erasing flash0, count=%u ...", ret);
+	fflush(stdout);
 
 	ret = erase_page(dev, 0xaaa, 1);
 	if (ret != 0)
@@ -787,7 +793,7 @@ static int write_file(const char *fname, void *buff, int size)
 		fprintf(stderr, "write failed to %s", fname);
 		perror("");
 	} else
-		printf("saved to %s.\n", fname);
+		printf("saved to \"%s\".\n", fname);
 	fclose(file);
 	
 	return 0;
@@ -880,6 +886,7 @@ static void usage(const char *app_name)
 		"  -sr [file] read save RAM to file\n"
 		"  -sw <file> write save RAM file to device\n"
 		"  -sc        clear save RAM\n"
+		"  -sm[1-3]   set save RAM mode: off, special (>2M games + save), on\n"
 		"  -v         with -w or -sw: verify written file\n",
 		app_name);
 }
@@ -889,7 +896,7 @@ int main(int argc, char *argv[])
 	char *r_fname = NULL, *w_fname = NULL, *sr_fname = NULL, *sw_fname = NULL;
 	void *r_fdata = NULL, *w_fdata = NULL, *sr_fdata = NULL, *sw_fdata = NULL;
 	int do_read_ram = 0, do_clear_ram = 0, do_verify = 0, do_check = 1;
-	int pr_dev_info = 0, pr_rom_info = 0, do_read = 0;
+	int pr_dev_info = 0, pr_rom_info = 0, do_read = 0, sram_mode = 0;
 	int erase_method = 0, do_erase_size = 0;
 	int w_fsize = 0, sw_fsize = 0;
 	struct usb_dev_handle *device;
@@ -946,6 +953,9 @@ int main(int argc, char *argv[])
 			case 'c':
 				do_clear_ram = 1;
 				break;
+			case 'm':
+				sram_mode = argv[i][3];
+				break;
 			default:
 				goto breakloop;
 			}
@@ -982,20 +992,20 @@ breakloop:
 			do_erase_size = w_fsize;
 	}
 	if (sw_fname != NULL) {
-		ret = read_file(sw_fname, &sw_fdata, &sw_fsize, 0x8000);
+		ret = read_file(sw_fname, &sw_fdata, &sw_fsize, 0x8000*2);
 		if (ret < 0)
 			return 1;
 	}
 	if (sw_fdata != NULL || do_clear_ram) {
-		if (sw_fsize < 0x8000) {
-			sw_fdata = realloc(sw_fdata, 0x8000);
+		if (sw_fsize < 0x8000*2) {
+			sw_fdata = realloc(sw_fdata, 0x8000*2);
 			if (sw_fdata == NULL) {
 				fprintf(stderr, "low mem\n");
 				return 1;
 			}
-			memset((u8 *)sw_fdata + sw_fsize, 0, 0x8000 - sw_fsize);
+			memset((u8 *)sw_fdata + sw_fsize, 0, 0x8000*2 - sw_fsize);
 		}
-		sw_fsize = 0x8000;
+		sw_fsize = 0x8000*2;
 	}
 	if (w_fname == NULL && sw_fname == NULL && do_verify) {
 		fprintf(stderr, "warning: -w or -sw not specified, -v ignored.\n");
@@ -1113,19 +1123,19 @@ breakloop:
 	}
 
 	if (sr_fname != NULL || do_verify) {
-		sr_fdata = malloc(0x8000);
+		sr_fdata = malloc(0x8000*2);
 		if (sr_fdata == NULL) {
 			fprintf(stderr, "low mem\n");
 			goto end;
 		}
 
-		ret = read_write_ram(device, sr_fdata, 0x8000, 0);
+		ret = read_write_ram(device, sr_fdata, 0x8000*2, 0);
 		if (ret < 0)
 			goto end;
 	}
 
 	if (sr_fname != NULL)
-		write_file(sr_fname, sr_fdata, 0x8000);
+		write_file(sr_fname, sr_fdata, 0x8000*2);
 
 	/* verify */
 	if (do_verify && w_fdata != NULL && r_fdata != NULL) {
@@ -1137,15 +1147,34 @@ breakloop:
 	}
 
 	if (do_verify && sw_fdata != NULL && sr_fdata != NULL) {
-		ret = memcmp(sw_fdata, sr_fdata, 0x8000);
+		ret = memcmp(sw_fdata, sr_fdata, 0x8000*2);
 		if (ret == 0)
 			printf("RAM verification passed.\n");
 		else
 			printf("RAM verification FAILED!\n");
 	}
 
-	if (w_fsize != 0)
-		set_ram_mode(device, w_fsize > 0x200000 ? C_RAM_SWITCH : C_RAM_ON);
+	/* save RAM mode */
+	if (sram_mode || w_fsize != 0) {
+		if (sram_mode == 0)
+			sram_mode = w_fsize > 0x200000 ? '2' : '3';
+		printf("Save RAM mode set to ");
+		switch (sram_mode) {
+		case '1':
+			printf("OFF.\n");
+			sram_mode = C_RAM_OFF;
+			break;
+		case '2':
+			printf("ON for >2M games.\n");
+			sram_mode = C_RAM_SWITCH;
+			break;
+		default:
+			printf("always ON.\n");
+			sram_mode = C_RAM_ON;
+			break;
+		}
+		set_ram_mode(device, sram_mode);
+	}
 
 	printf("all done.\n");
 	ret = 0;
