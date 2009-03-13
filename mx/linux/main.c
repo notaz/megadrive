@@ -1,3 +1,4 @@
+/* FIXME: RAM odd */
 #include <stdio.h>
 #include <string.h>
 #include <usb.h>
@@ -32,8 +33,9 @@ static const struct {
 #define CMD_SEC_READY		'C'	/* is flash ready? */
 #define CMD_SEC_READ		'R'
 #define CMD_SEC_WRITE		'W'
-#define CMD_SEC_RAM_READ	'D'
+#define CMD_SEC_RAM_READ	'D'	/* not implemented? */
 #define CMD_SEC_RAM_WRITE	'U'
+#define CMD_SEC_COMPAT		'$'	/* set RAM mode */
 
 /* bus controllers */
 #define CTL_DATA_BUS	0x55
@@ -46,6 +48,14 @@ static const struct {
 #define FILENAME_ROM0	0
 #define FILENAME_ROM1	1
 #define FILENAME_RAM	2
+
+/* windows app sets to 0x80 on init
+ * checkboxes use 0x41 0x42 0x43 (?)
+ * r,w Ram/ROM uses 0x23/0x21
+ */
+#define C_RAM_OFF	0x21	/* RAM always off */
+#define C_RAM_SWITCH	0x22	/* RAM switched by game */
+#define C_RAM_ON	0x23
 
 typedef struct {
 	u8 magic[4];
@@ -67,7 +77,7 @@ typedef struct {
 		} rom_rw;
 		struct {
 			u8 which;
-		} filename;
+		} filename, mode;
 		struct {
 			u8 cmd;
 			u8 action;
@@ -354,6 +364,28 @@ static int get_page_size(const page_table_t *table, u32 addr, u32 *size)
 	return -1;
 }
 
+static int set_ram_mode(struct usb_dev_handle *dev, u8 mode)
+{
+	dev_cmd_t cmd;
+	u8 buff[2];
+	int ret;
+
+	prepare_cmd(&cmd, CMD_SEC_COMPAT);
+	cmd.write_flag = 1;
+	cmd.mode.which = mode;
+
+	ret = write_cmd(dev, &cmd);
+	if (ret < 0)
+		goto end;
+
+	ret = read_data(dev, buff, sizeof(buff));
+
+end:
+	if (ret < 0)
+		fprintf(stderr, "warning: failed to set RAM mode\n");
+	return ret;
+}
+
 /* limitations:
  * - bytes must be multiple of 64
  * - bytes must be less than 16k
@@ -407,6 +439,8 @@ static int read_write_rom(struct usb_dev_handle *dev, u32 addr, void *buffer, in
 		fprintf(stderr, "read_write_rom: byte count must be multiple of 64, "
 				"last %d bytes will not be handled\n", bytes & 63);
 
+	set_ram_mode(dev, C_RAM_OFF);
+
 	printf("%s flash ROM...\n", is_write ? "writing to" : "reading");
 
 	/* do i/o in blocks */
@@ -439,7 +473,7 @@ static int read_write_rom(struct usb_dev_handle *dev, u32 addr, void *buffer, in
 
 static int read_write_ram(struct usb_dev_handle *dev, void *buffer, int bytes, int is_write)
 {
-	int mx_cmd = is_write ? CMD_SEC_RAM_WRITE : CMD_SEC_RAM_READ;
+	int mx_cmd = is_write ? CMD_SEC_RAM_WRITE : CMD_SEC_READ;
 	int total_bytes = bytes;
 	u8 *buff = buffer;
 	u32 addr = 0x200000;
@@ -449,6 +483,8 @@ static int read_write_ram(struct usb_dev_handle *dev, void *buffer, int bytes, i
 		fprintf(stderr, "read_write_ram: byte count must be multiple of %d, "
 				"last %d bytes will not be handled\n", IO_RAM_BLK_SIZE,
 				bytes % IO_RAM_BLK_SIZE);
+
+	set_ram_mode(dev, C_RAM_ON);
 
 	printf("%s RAM...\n", is_write ? "writing to" : "reading");
 
@@ -720,7 +756,8 @@ static int read_file(const char *fname, void **buff_out, int *size, int limit)
 
 	ret = fread(data, 1, file_size, file);
 	if (ret != file_size) {
-		fprintf(stderr, "failed to read file: %s\n", fname);
+		fprintf(stderr, "failed to read file: %s", fname);
+		perror("");
 		goto fail;
 	}
 
@@ -745,12 +782,13 @@ static int write_file(const char *fname, void *buff, int size)
 		return -1;
 	}
 
-	ret = fwrite(fname, 1, size, file);
-	fclose(file);
-	if (ret != size)
-		fprintf(stderr, "write failed to %s\n", fname);
-	else
+	ret = fwrite(buff, 1, size, file);
+	if (ret != size) {
+		fprintf(stderr, "write failed to %s", fname);
+		perror("");
+	} else
 		printf("saved to %s.\n", fname);
+	fclose(file);
 	
 	return 0;
 }
@@ -909,8 +947,9 @@ int main(int argc, char *argv[])
 				do_clear_ram = 1;
 				break;
 			default:
-				/* fall though */;
+				goto breakloop;
 			}
+			break;
 		default:
 			goto breakloop;
 		}
@@ -1080,13 +1119,13 @@ breakloop:
 			goto end;
 		}
 
-		ret = read_write_ram(device, sr_fdata, 0x400000, 0);
+		ret = read_write_ram(device, sr_fdata, 0x8000, 0);
 		if (ret < 0)
 			goto end;
 	}
 
 	if (sr_fname != NULL)
-		write_file(sr_fname, sr_fdata, 0x400000);
+		write_file(sr_fname, sr_fdata, 0x8000);
 
 	/* verify */
 	if (do_verify && w_fdata != NULL && r_fdata != NULL) {
@@ -1104,6 +1143,9 @@ breakloop:
 		else
 			printf("RAM verification FAILED!\n");
 	}
+
+	if (w_fsize != 0)
+		set_ram_mode(device, w_fsize > 0x200000 ? C_RAM_SWITCH : C_RAM_ON);
 
 	printf("all done.\n");
 	ret = 0;
