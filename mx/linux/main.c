@@ -53,9 +53,9 @@ static const struct {
  * checkboxes use 0x41 0x42 0x43 (?)
  * r,w Ram/ROM uses 0x23/0x21
  */
-#define C_RAM_OFF	0x41	/* RAM always off */
-#define C_RAM_SWITCH	0x42	/* RAM switched by game */
-#define C_RAM_ON	0x43
+#define C_MODE_4M_NORAM	0x41	/* RAM always off */
+#define C_MODE_4M_RAM	0x42	/* RAM switched by game */
+#define C_MODE_2M_RAM	0x43
 #define C_RAM_TMP_OFF	0x21
 #define C_RAM_TMP_ON	0x23
 
@@ -880,13 +880,13 @@ static void usage(const char *app_name)
 		"  -i         print some info about connected device\n"
 		"  -g         print some info about game ROM inside device\n"
 		"  -e[1]      erase whole flash ROM in device, '1' uses different erase method\n"
+		"  -m[1-3]    set MX mode: 2M+RAM, 4M no RAM, 4M+RAM\n"
 		"  -f         skip file check\n"
 		"  -r [file]  copy game image from device to file; can autodetect filename\n"
 		"  -w <file>  write file to device; also does erase\n"
 		"  -sr [file] read save RAM to file\n"
 		"  -sw <file> write save RAM file to device\n"
 		"  -sc        clear save RAM\n"
-		"  -sm[1-3]   set save RAM mode: off, special (>2M games + save), on\n"
 		"  -v         with -w or -sw: verify written file\n",
 		app_name);
 }
@@ -896,7 +896,7 @@ int main(int argc, char *argv[])
 	char *r_fname = NULL, *w_fname = NULL, *sr_fname = NULL, *sw_fname = NULL;
 	void *r_fdata = NULL, *w_fdata = NULL, *sr_fdata = NULL, *sw_fdata = NULL;
 	int do_read_ram = 0, do_clear_ram = 0, do_verify = 0, do_check = 1;
-	int pr_dev_info = 0, pr_rom_info = 0, do_read = 0, sram_mode = 0;
+	int pr_dev_info = 0, pr_rom_info = 0, do_read = 0, mx_mode = 0;
 	int erase_method = 0, do_erase_size = 0;
 	int w_fsize = 0, sw_fsize = 0;
 	struct usb_dev_handle *device;
@@ -926,6 +926,9 @@ int main(int argc, char *argv[])
 		case 'v':
 			do_verify = 1;
 			break;
+		case 'm':
+			mx_mode = argv[i][2];
+			break;
 		case 'r':
 			do_read = 1;
 			if (argv[i+1] && argv[i+1][0] != '-')
@@ -952,9 +955,6 @@ int main(int argc, char *argv[])
 				break;
 			case 'c':
 				do_clear_ram = 1;
-				break;
-			case 'm':
-				sram_mode = argv[i][3];
 				break;
 			default:
 				goto breakloop;
@@ -1030,6 +1030,28 @@ breakloop:
 		ret = print_game_info(device);
 		if (ret < 0)
 			goto end;
+	}
+
+	/* set mode */
+	if (mx_mode || w_fsize > 0x200000) {
+		if (mx_mode == 0)
+			mx_mode = '3';
+		printf("MX mode set to ");
+		switch (mx_mode) {
+		case '1':
+			printf("2M with RAM.\n");
+			mx_mode = C_MODE_2M_RAM;
+			break;
+		case '2':
+			printf("4M, no RAM.\n");
+			mx_mode = C_MODE_4M_NORAM;
+			break;
+		default:
+			printf("4M with RAM.\n");
+			mx_mode = C_MODE_4M_RAM;
+			break;
+		}
+		set_ram_mode(device, mx_mode);
 	}
 
 	/* erase */
@@ -1152,28 +1174,6 @@ breakloop:
 			printf("RAM verification passed.\n");
 		else
 			printf("RAM verification FAILED!\n");
-	}
-
-	/* save RAM mode */
-	if (sram_mode || w_fsize != 0) {
-		if (sram_mode == 0)
-			sram_mode = w_fsize > 0x200000 ? '2' : '3';
-		printf("Save RAM mode set to ");
-		switch (sram_mode) {
-		case '1':
-			printf("OFF.\n");
-			sram_mode = C_RAM_OFF;
-			break;
-		case '2':
-			printf("ON for >2M games.\n");
-			sram_mode = C_RAM_SWITCH;
-			break;
-		default:
-			printf("always ON.\n");
-			sram_mode = C_RAM_ON;
-			break;
-		}
-		set_ram_mode(device, sram_mode);
 	}
 
 	printf("all done.\n");
