@@ -1,8 +1,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#define IN_SIZE 0x8000
-static unsigned char buff[0x400000], buff_in[IN_SIZE];
+#define IN_SIZE		0x8000
+#define OUT_SIZE	0x400000
+static unsigned char buff[OUT_SIZE], buff_in[IN_SIZE];
 
 int main(int argc, char *argv[])
 {
@@ -44,10 +45,10 @@ int main(int argc, char *argv[])
 	for (bsize = 1; bsize < size; bsize <<= 1)
 		;
 
-	for (i = 0, o = 0; o < sizeof(buff); i = (i + 1) & (bsize - 1), o += 2)
-		buff[o] = buff[o+1] = buff_in[i];
+	for (i = o = 0; o < sizeof(buff); i = (i + 1) & (bsize - 1), o += 2)
+		buff[o+1] = buff_in[i];
 
-	if (fwrite(buff, 1, 0x400000, fo) != 0x400000)
+	if (fwrite(buff, 1, OUT_SIZE, fo) != OUT_SIZE)
 		fprintf(stderr, "failed to write to %s\n", argv[2]);
 	fclose(fi);
 	fclose(fo);
