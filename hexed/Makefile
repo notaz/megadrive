@@ -6,7 +6,7 @@ OBJCOPY = $(CROSS)objcopy
 ASFLAGS = -m68000 --register-prefix-optional --bitwise-or 
 
 TARGET = hexed.bin
-OBJS = sega_gcc.o test.o font.o
+OBJS = sega_gcc.o hexed.o font.o
 
 all : $(TARGET)
 
