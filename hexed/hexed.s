@@ -65,40 +65,31 @@
 .endm
 
 
-# make VDP word from address adr to d0
-# destroys d7
-.macro VRAM_ADDR_var adr
-	move.l \adr,d0
-	move.l \adr,d7
-	and.w #0x3fff,d0
-	lsr.w #7,d7
-	lsr.w #7,d7
-	add.w #0x4000,d0
-	lsl.l #7,d0
-	lsl.l #7,d0
-	lsl.l #2,d0
-	or.l d7,d0
-.endm
-
-
 .macro CRAM_ADDR reg adr
 	move.l	#(((0xc000 + (\adr & 0x3fff)) << 16) + (\adr >> 14)),\reg
 .endm
 
 
-/* For indirect (variable) addresses */
-.macro CRAM_ADDR_var reg adr
-	move.l \adr,d6
-	move.l \adr,d7
-	and.w #0x3fff,d6
-	lsr.w #7,d7
-	lsr.w #7,d7
-	add.w #0xc000,d6
-	lsl.l #7,d6
-	lsl.l #7,d6
-	lsl.l #2,d6
-	or.l d7,d6
-	move.l d6,\reg
+# make VDP word from address adr and store in d0
+.macro XRAM_ADDR_var adr
+	move.l \adr,d0
+	lsl.l #8,d0
+	lsl.l #8,d0
+	rol.l #2,d0
+	lsl.b #2,d0
+	lsr.l #2,d0
+.endm
+
+
+.macro VRAM_ADDR_var adr
+	XRAM_ADDR_var \adr
+	or.l #0x40000000,d0
+.endm
+
+
+.macro CRAM_ADDR_var adr
+	XRAM_ADDR_var \adr
+	or.l #0xc0000000,d0
 .endm
 
 
@@ -146,46 +137,46 @@ main:
 	jsr 		init_gfx
 
 	/* Load color data */
-	movea.l		#0,a3
-	movea.l		#colors,a4
-	moveq.l		#(colors_end-colors)/2,d4
+	movea.l		#0,a0
+	movea.l		#colors,a1
+	moveq.l		#(colors_end-colors)/2,d0
 	jsr		load_colors
 
 	/* load patterns */
-	movea.l		#0,a3
-	movea.l		#font,a4
-	move.l		#128,d4
+	movea.l		#0,a0
+	movea.l		#font,a1
+	move.l		#128,d0
 	jsr		load_tiles
 
 	/* generate A layer map */
 	movea.l		#0xe000,a6
 	move.l		#28-1,d4
 lmaploop0:
-	movea.l		a6,a3
+	movea.l		a6,a0
 	jsr		load_prepare
 
 	move.l		#64/2-1,d3
-0:	move.l		#0x00000000,(a3)
+0:	move.l		#0x00000000,(a0)
 	dbra		d3,0b
 
 	add.l		#64*2,a6
 	dbra 		d4,lmaploop0
 
 	/* generate B layer map */
-	movea.l		#0xc000,a3
+	movea.l		#0xc000,a0
 	jsr		load_prepare
 
 	move.l		#64*28/2-1,d3
-0:	move.l		#0x00000000,(a3)
+0:	move.l		#0x00000000,(a0)
 	dbra		d3,0b
 
 	/* upload sprite data */
-	movea.l		#0xfc00,a3
+	movea.l		#0xfc00,a0
 	jsr		load_prepare
-	movea.l		#sprite_data,a0
+	movea.l		#sprite_data,a1
 
 	move.l		#(sprite_data_end-sprite_data)/2-1,d3
-0:	move.l		(a0)+,(a3)
+0:	move.l		(a1)+,(a0)
 	dbra		d3,0b
 
 	jsr		wait_vsync
@@ -236,95 +227,80 @@ init_gfx:
 	rts
 
 
-
-#################################################
-#                                               #
-#        Load tile data from ROM                #
-#                                               #
-# Parameters:                                   #
-#  a3: VRAM base                                # 
-#  a4: pattern address                          #
-#  d4: number of tiles to load                  #
-#  Destroys a2,d0,d7...                         #
-#                                               #
-#################################################
+# Load tile data from ROM
+#  a0: VRAM base
+#  a1: pattern address
+#  d0: number of tiles to load
+#  destroys d1
 
 load_tiles:
-	move.l 		#GFXCNTL,a2
-	VRAM_ADDR_var 	a3
-	move.l 		d0,(a2)
-	lsl		#3,d4
+	move.l		d0,d1
+	VRAM_ADDR_var 	a0
+	move.l 		d0,(GFXCNTL).l
 	
-	move.l 		#GFXDATA,a3
-	subq.l 		#1,d4
-_copy_tile_data:
-	move.l 		(a4)+,(a3)
-	dbra 		d4,_copy_tile_data
+	move.l 		#GFXDATA,a0
+	lsl.w		#3,d1
+	subq.l 		#1,d1
+0:
+	move.l 		(a1)+,(a0)
+	dbra 		d1,0b
 
 	rts
 
 
 # Prepare to write to VDP RAM @a3
-#  a3: VRAM base
-#  a3 set to VDP data port for convenience
-#  destroys a2,d0,d7
+# sets a0 to VDP data port for convenience
+#  a0: VRAM base
+#  destroys d0
 
 load_prepare:
-	move.l 		#GFXCNTL,a2
-	VRAM_ADDR_var 	a3
-	move.l 		d0,(a2)
-	move.l 		#GFXDATA,a3
-
+	VRAM_ADDR_var 	a0
+	move.l 		d0,(GFXCNTL).l
+	move.l 		#GFXDATA,a0
 	rts
 
 
-#################################################
-#                                               #
-#        Load color data from ROM               #
-#                                               #
-# Parameters:                                   #
-#  a3: CRAM base                                # 
-#  a4: color list address                       #
-#  d4: number of colors to load                 #
-#                                               #
-#################################################
+# Load color data from ROM
+#  a0: CRAM base
+#  a1: color list address
+#  d0: number of colors to load
+#  destroys d1
 
 load_colors:
-	move.l 		#GFXCNTL,a2
-	CRAM_ADDR_var 	d0,a3
-	move.l 		d0,(a2)
+	move.l		d0,d1
+	CRAM_ADDR_var 	a0
+	move.l 		d0,(GFXCNTL).l
 
-	move.l 		#GFXDATA,a3
-	subq.w		#1,d4
-_copy_color_data:
-	move.w		(a4)+,(a3)
-	dbra		d4,_copy_color_data
+	move.l 		#GFXDATA,a0
+	subq.w		#1,d1
+0:
+	move.w		(a1)+,(a0)
+	dbra		d1,0b
 
 	rts
 
-#################################################
-##
-## print
-#   a0 - string
-#   d0 - x
-#   d1 - y 
+
+# print
+#  a0 - string
+#  d0 - x
+#  d1 - y 
+#  destroys a1
 
 print:
+	move.l		a0,a1
 	lsl.w		#6,d1
 	add.w		d1,d0
-	movea.l		#0xe000,a6
 	lsl.w		#1,d0
-	add.w		d0,a6
-	moveq.l		#0,d1
+	movea.l		#0xe000,a0
+	add.w		d0,a0
+	jsr		load_prepare
+	moveq.l		#0,d0
 
 _print_loop:
-	move.b		(a0)+,d1
+	move.b		(a1)+,d0
 	beq		_print_end
 
-	move.l		a6,a3
-	jsr		load_prepare
-	move.w		d1,(a3)
-	addq.l		#2,a6
+	move.w		d0,(a0)
 	jmp		_print_loop
 
 _print_end:
