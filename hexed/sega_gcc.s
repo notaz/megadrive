@@ -158,9 +158,9 @@ HBL:
         /* addq.l   #1,htimer */
 	rte
 
-VBL:
-	addq.l #1,(vtimer).l
-	rte
+* VBL:
+*	addq.l #1,(vtimer).l
+*	rte
 
 *----------------------------------------------------------        
 *
