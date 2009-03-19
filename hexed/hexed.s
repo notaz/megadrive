@@ -113,6 +113,20 @@
 	add.w		d0,a0
 .endm
 
+# check if some d-pad button (and modifier) is pressed
+.macro do_dpad bit op opq val modval
+	btst.b		#\bit,d0
+	beq		1f
+	btst.b		#4,d0		/* A pressed? */
+	bne		0f
+	\opq.l		#\val,a6
+	bra		input_end
+0:
+	\op.l		#\modval,a6
+	bra		input_end
+1:
+.endm
+
 #################################################
 #                                               #
 #                    DATA                       #
@@ -120,19 +134,19 @@
 #################################################
 
 colors:
-	dc.w 0x0000,0x0eee
+	dc.w 0x0000,0x0eee,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000
+	dc.w	0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000
+	dc.w 0x0000,0x02e2,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000
+	dc.w	0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000
+	dc.w 0x0000,0x0e44,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000
+	dc.w	0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000
 colors_end:
-
-# pattern:
 
 
 sprite_data:
 	/*         Y        size     link          attr        X */
 	dc.w       0;  dc.b 0x05;  dc.b 0;  dc.w 0x6002;  dc.w 0
 sprite_data_end:
-
-hello:
-	.ascii	"hello world"
 
 ##################################################
 #                                                #
@@ -143,10 +157,11 @@ hello:
 .align 2
 
 main:
-	/* mask irqs durinf init */
+	/* mask irqs during init */
 	move.w		#0x2700,sr
 
 	movea.l		#0,a6
+	moveq.l		#0,d7
 
 	/* Init pads */
 	move.b		#0x40,(0xa10009).l
@@ -207,7 +222,8 @@ lmaploop0:
 ##################################################
 
 # global regs:
-# a6 - page[31:8],cursor_offs[7:0]
+# a6 - page_start[31:8]|cursor_offs[7:0]
+# d7 - byte_mode[0]
 
 forever:
 
@@ -219,16 +235,22 @@ forever:
 
 VBL:
 	addq.l		#1,(vtimer).l
-	movem.l		d0-d7/a0-a5,-(a7)
+	movem.l		d0-d6/a0-a5,-(a7)
 
 	/* draw main stuff */
-	clr.l		d7
+	clr.l		d1
 	move.l		a6,d0
+	move.b		d0,d1
 	lsr.l		#8,d0
 	move.l		d0,a1		/* current addr */
+	lsr.b		#3,d1
+	neg.b		d1
+	add.b		#27-1,d1	/* line where the cursor sits */
+	swap		d1
 
 	movea.l		#0xe004,a2
-	move.l		#27-1,d5
+	move.l		#27-1,d5	/* line counter for dbra */
+	or.l		d1,d5
 
 draw_column:
 	move.l		a2,a0
@@ -240,16 +262,21 @@ draw_column:
 	jsr		print_hex_preped
 
 	/* 4 shorts */
+	moveq.l		#4,d3
 	moveq.l		#4-1,d4
 draw_shorts:
 	move.w		#' ',(a0)
 	move.w		(a1)+,d2
-	moveq.l		#4,d3
 	jsr		print_hex_preped
 	dbra		d4,draw_shorts
 
-	move.w		#' ',(a0)
-	move.w		#' ',(a0)
+	move.l		d5,d0
+	swap		d0
+	cmp.w		d5,d0
+	beq		draw_cursor
+
+draw_chars_pre:
+	move.l		#(' '<<16)|' ',(a0)
 
 	/* 8 chars */
 	subq.l		#8,a1
@@ -268,32 +295,69 @@ draw_chars:
 	add.w		#0x80,a2
 	dbra		d5,draw_column
 
+	/* status bar */
+	movea.l		#0xe004+64*2*27,a0
+	jsr		load_prepare
+	move.l		a6,d2
+	moveq.l		#0,d3
+	move.b		d2,d3
+	lsr.l		#8,d2
+	add.l		d3,d2
+	move.l		#0x4006,d3
+	jsr		print_hex_preped
+
 	/* handle input */
 	jsr		get_input		/* x0cbrldu x1sa00du */
-	btst.b		#0,d0
-	beq		_in_nup
-	sub.l		#0x0800,a6
 
-_in_nup:
-	btst.b		#1,d0
-	beq		_in_ndn
-	add.l		#0x0800,a6
+	do_dpad		0,  sub, subq, 0x0008, 0x0800
+	do_dpad		1,  add, addq, 0x0008, 0x0800
+	do_dpad		10, sub, subq, 0x0001, 0xd800
+	do_dpad		11, add, addq, 0x0001, 0xd800
+input_end:
 
-_in_ndn:
-	btst.l		#10,d0
-	beq		_in_nleft
+	/* update addr */
+	move.l		a6,d0
+	cmp.b		#0xf0,d0
+	blo		0f
 	sub.l		#0xd800,a6
-
-_in_nleft:
-	btst.b		#11,d0
-	beq		_in_nright
+	add.w		#0x00d8,a6
+	bra		1f
+0:
+	cmp.b		#0xe0,d0
+	blo		1f
 	add.l		#0xd800,a6
-
-_in_nright:
+	sub.w		#0x00d8,a6
+1:
 
 end:
-	movem.l		(a7)+,d0-d7/a0-a5
+	movem.l		(a7)+,d0-d6/a0-a5
 	rte
+
+
+draw_cursor:
+	move.l		a6,d0
+	and.l		#7,d0		/* byte offs */
+	move.l		d0,d1
+	lsr.b		#1,d1		/* which word */
+	move.b		d1,d2
+	lsl.b		#2,d2
+	add.b		d2,d1		/* num of chars to skip */
+	lsl.b		#1,d1
+
+	/* FIXME */
+	move.w		(-8,a1,d0),d2
+
+	lea		(7*2,a2,d1),a0
+	jsr		load_prepare
+
+	move.w		#0x2004,d3
+	jsr		print_hex_preped
+
+	move.l		a2,a0
+	add.w		#26*2,a0
+	jsr		load_prepare	/* restore a0 */
+
+	jmp		draw_chars_pre
 
 
 #################################################
@@ -420,34 +484,35 @@ _print_end:
 #  d0 - x
 #  d1 - y 
 #  d2 - value
-#  d3 - digit cnt
-#  destroys a0
+#  d3 - digit_cnt[0:7]|tile_bits[11:15]
+#  destroys a0, preserves d3
 
 print_hex:
 	XY2NT
 	jsr		load_prepare
 
 print_hex_preped:
-	move.l		d3,d0
+	moveq.l		#0,d0
+	move.b		d3,d0
+	move.l		d0,d1
 	lsl.b		#2,d0
 	ror.l		d0,d2		/* prep value */
-	moveq.l		#0,d0
-	subq.l		#1,d3		/* count */
+	subq.l		#1,d1		/* count */
+	move.w		d3,d0
+	and.w		#0xf800,d0	/* keep upper bits in d0 */
 
 _print_hex_loop:
 	rol.l		#4,d2
 	move.b		d2,d0
 	and.b		#0xf,d0
-	cmp.b		#0xa,d0
-	bge		1f
 
 	add.b		#'0',d0
-	jmp		2f
-1:
-	add.b		#0x37,d0
-2:
+	cmp.b		#'9',d0
+	ble		0f
+	addq.b		#7,d0
+0:
 	move.w		d0,(a0)
-	dbra		d3,_print_hex_loop
+	dbra		d1,_print_hex_loop
 
 	rts
 
