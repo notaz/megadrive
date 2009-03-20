@@ -30,7 +30,7 @@
 .equ VDP1_PAL,		0x08
 .equ VDP1_RESERVED,	0x04
 
-.equ VDP12_SPR_SHADOWS,	0x08
+.equ VDP12_STE,		0x08
 .equ VDP12_SCREEN_V224,	0x00
 .equ VDP12_SCREEN_V448,	0x04
 .equ VDP12_PROGRESSIVE,	0x00
@@ -114,17 +114,12 @@
 .endm
 
 # check if some d-pad button (and modifier) is pressed
-.macro do_dpad bit op opq val modval
-	btst.b		#\bit,d0
-	beq		1f
-	btst.b		#4,d0		/* A pressed? */
-	bne		0f
-	\opq.l		#\val,a6
-	bra		input_end
+.macro do_dpad bit op val
+	btst.l		#\bit,d0
+	beq		0f
+	\op.l		\val,a6
+	bra		dpad_end
 0:
-	\op.l		#\modval,a6
-	bra		input_end
-1:
 .endm
 
 #################################################
@@ -162,6 +157,7 @@ main:
 
 	movea.l		#0,a6
 	moveq.l		#0,d7
+	moveq.l		#0,d6
 
 	/* Init pads */
 	move.b		#0x40,(0xa10009).l
@@ -222,8 +218,9 @@ lmaploop0:
 ##################################################
 
 # global regs:
-# a6 - page_start[31:8]|cursor_offs[7:0]
-# d7 - byte_mode[0]
+# a6 = page_start[31:8]|cursor_offs[7:0]
+# d7 = old_inputs[31:16]|byte_mode[15]|g_mode[10:8]|irq_cnt[7:0]
+# d6 = autorep_cnt[3:0]
 
 forever:
 
@@ -234,10 +231,28 @@ forever:
 
 
 VBL:
-	addq.l		#1,(vtimer).l
-	movem.l		d0-d6/a0-a5,-(a7)
+	addq.b		#1,d7
+	movem.l		d0-d5/a0-a5,-(a7)
 
-	/* draw main stuff */
+	moveq.l		#0,d0
+	move.w		d7,d0
+	lsr.w		#6,d0
+	and.w		#0x1c,d0
+	move.l		(jumptab,pc,d0),a0
+	jmp		(a0)
+jumptab:
+	dc.l		mode_main
+	dc.l		mode_edit
+	dc.l		mode_main
+	dc.l		mode_main
+	dc.l		mode_main
+	dc.l		mode_main
+	dc.l		mode_main
+	dc.l		mode_main
+
+##################### main #######################
+
+mode_main:
 	clr.l		d1
 	move.l		a6,d0
 	move.b		d0,d1
@@ -309,12 +324,42 @@ draw_chars:
 	/* handle input */
 	jsr		get_input		/* x0cbrldu x1sa00du */
 
-	do_dpad		0,  sub, subq, 0x0008, 0x0800
-	do_dpad		1,  add, addq, 0x0008, 0x0800
-	do_dpad		10, sub, subq, 0x0001, 0xd800
-	do_dpad		11, add, addq, 0x0001, 0xd800
-input_end:
+	btst.l		#16+4,d0		/* A - scroll modifier */
+	beq		input_noa
 
+	do_dpad		16+0,  sub, #0x0800
+	do_dpad		16+1,  add, #0x0800
+	do_dpad		16+10, sub, #0xd800
+	do_dpad		16+11, add, #0xd800
+input_noa:
+	moveq.l		#0,d1
+	btst.l		#15,d7
+	seq		d1
+	neg.b		d1			/* 1 if word sel */
+	add.b		#1,d1
+
+	do_dpad		0,  subq, #0x0008
+	do_dpad		1,  addq, #0x0008
+	do_dpad		10, sub, d1
+	do_dpad		11, add, d1
+
+dpad_end:
+	moveq.l		#0,d1
+	btst.l		#12,d0			/* B - switch byte/word mode */
+	beq		input_nob
+	bchg.l		#15,d7
+	move.l		a6,d1
+	and.l		#1,d1
+	sub.l		d1,a6			/* make even, just in case */
+
+input_nob:
+	btst.l		#13,d0			/* C - edit selected byte */
+	beq		input_noc
+#	and.w		#0xf8ff,d7
+	or.w		#0x0100,d7		/* switch to edit mode */
+	write_vdp_reg	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320 | VDP12_STE)
+
+input_noc:
 	/* update addr */
 	move.l		a6,d0
 	cmp.b		#0xf0,d0
@@ -323,14 +368,14 @@ input_end:
 	add.w		#0x00d8,a6
 	bra		1f
 0:
-	cmp.b		#0xe0,d0
+	cmp.b		#0xd8,d0
 	blo		1f
 	add.l		#0xd800,a6
 	sub.w		#0x00d8,a6
 1:
 
-end:
-	movem.l		(a7)+,d0-d6/a0-a5
+vbl_end:
+	movem.l		(a7)+,d0-d5/a0-a5
 	rte
 
 
@@ -343,14 +388,24 @@ draw_cursor:
 	lsl.b		#2,d2
 	add.b		d2,d1		/* num of chars to skip */
 	lsl.b		#1,d1
+	move.w		#0x2004,d3
 
-	/* FIXME */
+	btst.l		#15,d7
+	beq		draw_cursor_word
+
+draw_cursor_byte:
+	move.b		(-8,a1,d0),d2
+	and.b		#1,d0
+	lsl.b		#2,d0
+	add.b		d0,d1
+	subq.b		#2,d3
+	bra		0f
+
+draw_cursor_word:
 	move.w		(-8,a1,d0),d2
-
+0:
 	lea		(7*2,a2,d1),a0
 	jsr		load_prepare
-
-	move.w		#0x2004,d3
 	jsr		print_hex_preped
 
 	move.l		a2,a0
@@ -358,6 +413,12 @@ draw_cursor:
 	jsr		load_prepare	/* restore a0 */
 
 	jmp		draw_chars_pre
+
+
+##################### edit #######################
+
+mode_edit:
+	jmp		vbl_end
 
 
 #################################################
@@ -388,8 +449,9 @@ init_gfx:
 
 
 # read single phase from controller
-#  a0 - addr
+#  #a0 - addr
 #  d0 - result
+#  destroys d1,d2
 get_input:
 	move.b		#0x40,(0xa10003)
 	nop
@@ -401,7 +463,26 @@ get_input:
 	nop
 	move.b		(0xa10003),d0
 	eor.w		#0xffff,d0
-#	move.b		#0x40,(0xa10003)
+
+	swap		d7
+	move.w		d7,d1
+	eor.w		d0,d1		/* changed btns */
+	move.w		d0,d7		/* old val */
+	swap		d7
+	and.w		d0,d1		/* what changed now */
+	bne		0f
+
+	addq.b		#1,d6
+	move.b		d6,d2
+	and.b		#7,d2		/* do autorepeat every 8 frames */
+	cmp.b		#7,d2
+	bne		1f
+	move.w		d0,d1
+0:
+	and.b		#0xf8,d6
+1:
+	swap		d0
+	move.w		d1,d0
 	rts
 
 # Load tile data from ROM
@@ -524,11 +605,10 @@ _print_hex_loop:
 #################################################
 
 wait_vsync:
-	movea.l		#vtimer,a0
-	move.l		(a0),a1
+	move.b		d7,d0
 _wait_change:
 	stop		#0x2000
-	cmp.l		(a0),a1
+	cmp.b		d7,d0
 	beq		_wait_change
 	rts
 
@@ -541,15 +621,7 @@ _wait_change:
 
 .bss
 
-# used by sega_gcc.s
-.globl htimer
-.globl vtimer
-.globl rand_num
-htimer:		.long 0
-vtimer:		.long 0
-rand_num:	.long 0
-
-#
+# nothing :)
 
 .end
 
