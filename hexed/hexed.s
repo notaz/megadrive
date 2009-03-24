@@ -45,6 +45,10 @@
 .equ VDP16_MAP_H64,	0x01
 .equ VDP16_MAP_H128,	0x03
 
+.equ MMODE_MAIN,	0
+.equ MMODE_VAL_INPUT,	1
+.equ MMODE_EDIT_VAL,	2
+.equ MMODE_GOTO,	3
 
 
 ##################################################
@@ -122,6 +126,21 @@
 0:
 .endm
 
+# convert a6 to normal addr
+#  destroys d0
+.macro mk_a6_addr reg
+	move.l		a6,\reg
+	moveq.l		#0,d0
+	move.b		\reg,d0
+	lsr.l		#8,\reg
+	add.l		d0,\reg
+.endm
+
+.macro change_mode mode_new mode_back
+	and.w		#0xc0ff,d7
+	or.w		#(\mode_back<<11)|(\mode_new<<8),d7
+.endm
+
 #################################################
 #                                               #
 #                    DATA                       #
@@ -143,6 +162,11 @@ sprite_data:
 	dc.w       0;  dc.b 0x05;  dc.b 0;  dc.w 0x6002;  dc.w 0
 sprite_data_end:
 
+txt_edit:
+	.ascii	"- edit -\0"
+txt_a_confirm:
+	.ascii	"A-confirm\0"
+
 ##################################################
 #                                                #
 #               MAIN PROGRAM                     #
@@ -156,7 +180,7 @@ main:
 	move.w		#0x2700,sr
 
 	movea.l		#0,a6
-	moveq.l		#0,d7
+	move.l		#0x8000,d7
 	moveq.l		#0,d6
 
 	/* Init pads */
@@ -219,8 +243,8 @@ lmaploop0:
 
 # global regs:
 # a6 = page_start[31:8]|cursor_offs[7:0]
-# d7 = old_inputs[31:16]|byte_mode[15]|g_mode[10:8]|irq_cnt[7:0]
-# d6 = autorep_cnt[3:0]
+# d7 = old_inputs[31:16]|edit_bytes[15:14]|g_mode_old[13:11]|g_mode[10:8]|irq_cnt[7:0]
+# d6 = edit_word[31:8]|edit_done[7]|edit_pos[6:4]|autorep_cnt[3:0]
 
 forever:
 
@@ -242,9 +266,9 @@ VBL:
 	jmp		(a0)
 jumptab:
 	dc.l		mode_main
-	dc.l		mode_edit
-	dc.l		mode_main
-	dc.l		mode_main
+	dc.l		mode_val_input
+	dc.l		mode_edit_val	/* edit val in editor */
+	dc.l		mode_goto
 	dc.l		mode_main
 	dc.l		mode_main
 	dc.l		mode_main
@@ -313,11 +337,7 @@ draw_chars:
 	/* status bar */
 	movea.l		#0xe004+64*2*27,a0
 	jsr		load_prepare
-	move.l		a6,d2
-	moveq.l		#0,d3
-	move.b		d2,d3
-	lsr.l		#8,d2
-	add.l		d3,d2
+	mk_a6_addr	d2
 	move.l		#0x4006,d3
 	jsr		print_hex_preped
 
@@ -333,10 +353,9 @@ draw_chars:
 	do_dpad		16+11, add, #0xd800
 input_noa:
 	moveq.l		#0,d1
-	btst.l		#15,d7
-	seq		d1
-	neg.b		d1			/* 1 if word sel */
-	add.b		#1,d1
+	move.w		d7,d1
+	lsr.w		#7,d1
+	lsr.w		#7,d1
 
 	do_dpad		0,  subq, #0x0008
 	do_dpad		1,  addq, #0x0008
@@ -344,10 +363,26 @@ input_noa:
 	do_dpad		11, add, d1
 
 dpad_end:
+	/* update addr */
+	move.l		a6,d1
+	cmp.b		#0xf0,d1
+	blo		0f
+	sub.l		#0xd800,a6
+	add.w		#0x00d8,a6
+	bra		1f
+0:
+	cmp.b		#0xd8,d1
+	blo		1f
+	add.l		#0xd800,a6
+	sub.w		#0x00d8,a6
+1:
+
+	/* other btns */
 	moveq.l		#0,d1
 	btst.l		#12,d0			/* B - switch byte/word mode */
 	beq		input_nob
-	bchg.l		#15,d7
+	bclr.l		#15,d7
+	add.w		#0x4000,d7		/* changes between 01 10 */
 	move.l		a6,d1
 	and.l		#1,d1
 	sub.l		d1,a6			/* make even, just in case */
@@ -355,25 +390,18 @@ dpad_end:
 input_nob:
 	btst.l		#13,d0			/* C - edit selected byte */
 	beq		input_noc
-#	and.w		#0xf8ff,d7
-	or.w		#0x0100,d7		/* switch to edit mode */
+
+	change_mode	MMODE_EDIT_VAL, MMODE_MAIN
 	write_vdp_reg	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320 | VDP12_STE)
 
 input_noc:
-	/* update addr */
-	move.l		a6,d0
-	cmp.b		#0xf0,d0
-	blo		0f
-	sub.l		#0xd800,a6
-	add.w		#0x00d8,a6
-	bra		1f
-0:
-	cmp.b		#0xd8,d0
-	blo		1f
-	add.l		#0xd800,a6
-	sub.w		#0x00d8,a6
-1:
+	btst.l		#5,d0			/* Start - goto */
+	beq		input_nos
 
+	change_mode	MMODE_GOTO, MMODE_MAIN
+	write_vdp_reg	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320 | VDP12_STE)
+
+input_nos:
 vbl_end:
 	movem.l		(a7)+,d0-d5/a0-a5
 	rte
@@ -391,7 +419,7 @@ draw_cursor:
 	move.w		#0x2004,d3
 
 	btst.l		#15,d7
-	beq		draw_cursor_word
+	bne		draw_cursor_word
 
 draw_cursor_byte:
 	move.b		(-8,a1,d0),d2
@@ -415,9 +443,236 @@ draw_cursor_word:
 	jmp		draw_chars_pre
 
 
-##################### edit #######################
+#################### hedit #######################
 
-mode_edit:
+mode_edit_val:
+	btst.l		#7,d6
+	bne		mode_hedit_finish
+
+	/* read val to edit */
+	mk_a6_addr	d1
+	move.l		d1,a0
+	moveq.l		#0,d0
+	btst.l		#15,d7
+	bne		0f
+	move.b		(a0),d0
+	bra		1f
+0:
+	move.w		(a0),d0
+1:
+	lsl.l		#8,d0
+	and.l		#0xff,d6
+	or.l		d0,d6
+
+	and.b		#0x0f,d6	/* not done, reset pos */
+	change_mode	MMODE_VAL_INPUT, MMODE_EDIT_VAL
+	jmp		vbl_end
+
+mode_hedit_finish:
+	/* write the val */
+	mk_a6_addr	d1
+	move.l		d1,a0
+	move.l		d6,d0
+	lsr.l		#8,d0
+
+	btst.l		#15,d7
+	bne		0f
+	move.b		d0,(a0)
+	bra		1f
+0:
+	move.w		d0,(a0)
+1:
+
+	and.l		#0xf,d6		/* forget val and pos */
+	bra		return_to_main
+
+##################### goto #######################
+
+mode_goto:
+	btst.l		#7,d6
+	bne		mode_goto_finish
+
+	or.w		#0xc000,d7	/* 3 bytes */
+	bclr.l		#7,d6
+	change_mode	MMODE_VAL_INPUT, MMODE_GOTO
+	jmp		vbl_end
+
+mode_goto_finish:
+	move.l		d6,d0
+	lsr.l		#8,d0
+	move.l		d0,d1
+	and.l		#7,d1
+	and.b		#0xf8,d0
+	lsl.l		#8,d0
+	or.l		d1,d0
+	move.l		d0,a6
+
+	and.w		#0x3fff,d7
+	or.w		#0x8000,d7	/* back to 2 bytes */
+	bra		return_to_main
+
+################### val edit #####################
+
+mode_val_input:
+	/* frame */
+	movea.l		#0xe000+14*2+11*64*2,a1
+	moveq.l		#6-1,d1
+0:
+	move.w		a1,a0
+	jsr		load_prepare
+	moveq.l		#11-1,d0
+1:
+	move.w		#0,(a0)
+	dbra		d0,1b
+
+	add.w		#64*2,a1
+	dbra		d1,0b
+
+	/* text */
+	lea		txt_edit,a0
+	move.l		#15,d0
+	move.l		#11,d1
+	move.l		#0xc000,d2
+	jsr		print
+
+	lea		txt_a_confirm,a0
+	move.l		#15,d0
+	move.l		#15,d1
+	move.l		#0xc000,d2
+	jsr		print
+
+	/* edit field */
+	moveq.l		#0,d0
+	moveq.l		#0,d1
+	moveq.l		#0,d3
+	move.w		d7,d3
+	lsr.w		#7,d3
+	lsr.w		#7,d3
+
+	move.b		#19,d0
+	sub.b		d3,d0
+	move.b		#13,d1
+	move.l		d6,d2
+	lsr.l		#8,d2
+	add.b		d3,d3
+	or.w		#0x8000,d3
+	jsr		print_hex
+
+	/* current char */
+	moveq.l		#0,d0
+	moveq.l		#0,d1
+
+	and.w		#6,d3
+	move.b		#19,d0
+	move.b		d3,d1
+	lsr.b		#1,d1		/* length in bytes */
+	sub.b		d1,d0
+	move.b		d6,d1
+	lsr.b		#4,d1
+	and.b		#7,d1		/* nibble to edit */
+	add.b		d1,d0
+
+	sub.b		d1,d3
+	sub.b		#1,d3		/* chars to shift out */
+	lsl.b		#2,d3
+	add.b		#8,d3
+	move.l		d6,d2
+	lsr.l		d3,d2
+
+	move.b		#13,d1
+	move.w		#0xa001,d3
+	jsr		print_hex
+
+	/* handle input */
+	jsr		get_input	/* x0cbrldu x1sa00du */
+
+	move.w		d0,d1
+	and.w		#0x0f00,d1
+	beq		ai_no_dpad
+	move.w		d7,d1
+	lsr.w		#7,d1
+	lsr.w		#7,d1
+	add.b		d1,d1		/* nibble count */
+	sub.b		#1,d1		/* max n.t.e. val */
+	move.b		d6,d2
+	lsr.b		#4,d2
+	and.b		#7,d2		/* nibble to edit */
+
+	move.b		d0,d3
+	and.b		#3,d3
+	beq		ai_no_ud
+	moveq.l		#0,d3
+	moveq.l		#0,d4
+	move.b		#0xf,d3
+	move.b		#0x1,d4
+	sub.b		d2,d1
+	lsl.b		#2,d1
+	add.b		#8,d1
+	lsl.l		d1,d3		/* mask */
+	lsl.l		d1,d4		/* what to add/sub */
+	move.l		d6,d1
+	and.l		d3,d1
+	btst.l		#8,d0
+	beq		0f
+	add.l		d4,d1
+	bra		1f
+0:
+	sub.l		d4,d1
+1:
+	and.l		d3,d1
+	eor.l		#0xffffffff,d3
+	and.l		d3,d6
+	or.l		d1,d6
+	jmp		vbl_end
+
+ai_no_ud:
+	btst.l		#10,d0
+	bne		0f
+	add.b		#1,d2
+	bra		1f
+0:
+	sub.b		#1,d2
+1:
+	cmp.b		#0,d2
+	bge		0f
+	move.b		d1,d2
+0:
+	cmp.b		d1,d2
+	ble		0f
+	move.b		#0,d2
+0:
+	and.b		#0x8f,d6
+	lsl.b		#4,d2
+	or.b		d2,d6
+	jmp		vbl_end
+
+ai_no_dpad:
+	move.w		d0,d1
+	and.w		#0x1020,d1
+	beq		ai_no_sb
+
+	and.l		#0xf,d6		/* forget val and pos */
+	bra		return_to_main
+
+ai_no_sb:
+	btst.l		#4,d0
+	beq		ai_no_input
+	bset.l		#7,d6
+	move.w		d7,d1
+	and.w		#0x3800,d1
+	lsr.w		#3,d1
+	and.w		#0xc0ff,d7
+	or.w		d1,d7
+
+ai_no_input:
+	jmp		vbl_end
+
+
+# go back to main mode
+return_to_main:
+	bclr.l		#7,d6
+	change_mode	MMODE_MAIN, MMODE_MAIN
+	write_vdp_reg	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320)
 	jmp		vbl_end
 
 
@@ -506,7 +761,7 @@ load_tiles:
 	rts
 
 
-# Prepare to write to VDP RAM @a3
+# Prepare to write to VDP RAM @a0
 # sets a0 to VDP data port for convenience
 #  a0: VRAM base
 #  destroys d0
@@ -542,13 +797,15 @@ load_colors:
 #  a0 - string
 #  d0 - x
 #  d1 - y 
+#  d2 - tile_bits[15:11]
 #  destroys a1
 
 print:
 	move.l		a0,a1
 	XY2NT
 	jsr		load_prepare
-	moveq.l		#0,d0
+	move.l		d2,d0
+	and.w		#0xf800,d0
 
 _print_loop:
 	move.b		(a1)+,d0
