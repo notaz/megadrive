@@ -244,11 +244,10 @@ lmaploop0:
 # global regs:
 # a6 = page_start[31:8]|cursor_offs[7:0]
 # d7 = old_inputs[31:16]|edit_bytes[15:14]|g_mode_old[13:11]|g_mode[10:8]|irq_cnt[7:0]
-# d6 = edit_word[31:8]|edit_done[7]|edit_pos[6:4]|autorep_cnt[3:0]
+# d6 = edit_word_save[31:15]|edit_done[7]|autorep_cnt[3:0]
+# d5 = edit_word[31:8]|edit_pos[4:2]|byte_cnt[1:0]; tmp in main mode
 
 forever:
-
-
 	jsr		wait_vsync
 	bra 		forever
 	
@@ -256,7 +255,7 @@ forever:
 
 VBL:
 	addq.b		#1,d7
-	movem.l		d0-d5/a0-a5,-(a7)
+	movem.l		d0-d4/a0-a5,-(a7)
 
 	moveq.l		#0,d0
 	move.w		d7,d0
@@ -403,7 +402,7 @@ input_noc:
 
 input_nos:
 vbl_end:
-	movem.l		(a7)+,d0-d5/a0-a5
+	movem.l		(a7)+,d0-d4/a0-a5
 	rte
 
 
@@ -450,21 +449,21 @@ mode_edit_val:
 	bne		mode_hedit_finish
 
 	/* read val to edit */
+	moveq.l		#0,d5
 	mk_a6_addr	d1
 	move.l		d1,a0
-	moveq.l		#0,d0
 	btst.l		#15,d7
 	bne		0f
-	move.b		(a0),d0
+	move.b		(a0),d5
+	lsl.l		#8,d5
+	or.b		#1,d5
 	bra		1f
 0:
-	move.w		(a0),d0
+	move.w		(a0),d5
+	lsl.l		#8,d5
+	or.b		#2,d5
 1:
-	lsl.l		#8,d0
-	and.l		#0xff,d6
-	or.l		d0,d6
 
-	and.b		#0x0f,d6	/* not done, reset pos */
 	change_mode	MMODE_VAL_INPUT, MMODE_EDIT_VAL
 	jmp		vbl_end
 
@@ -472,18 +471,16 @@ mode_hedit_finish:
 	/* write the val */
 	mk_a6_addr	d1
 	move.l		d1,a0
-	move.l		d6,d0
-	lsr.l		#8,d0
+	lsr.l		#8,d5
 
 	btst.l		#15,d7
 	bne		0f
-	move.b		d0,(a0)
+	move.b		d5,(a0)
 	bra		1f
 0:
-	move.w		d0,(a0)
+	move.w		d5,(a0)
 1:
 
-	and.l		#0xf,d6		/* forget val and pos */
 	bra		return_to_main
 
 ##################### goto #######################
@@ -492,14 +489,19 @@ mode_goto:
 	btst.l		#7,d6
 	bne		mode_goto_finish
 
-	or.w		#0xc000,d7	/* 3 bytes */
+	moveq.l		#0,d5
+	swap		d6
+	move.w		d6,d5
+	swap		d6
+	swap		d5
+	or.b		#3,d5		/* 3 bytes */
 	bclr.l		#7,d6
 	change_mode	MMODE_VAL_INPUT, MMODE_GOTO
 	jmp		vbl_end
 
 mode_goto_finish:
-	move.l		d6,d0
-	lsr.l		#8,d0
+	lsr.l		#8,d5
+	move.l		d5,d0
 	move.l		d0,d1
 	and.l		#7,d1
 	and.b		#0xf8,d0
@@ -507,8 +509,11 @@ mode_goto_finish:
 	or.l		d1,d0
 	move.l		d0,a6
 
-	and.w		#0x3fff,d7
-	or.w		#0x8000,d7	/* back to 2 bytes */
+	lsr.l		#8,d5
+	swap		d6
+	move.w		d5,d6
+	swap		d6
+
 	bra		return_to_main
 
 ################### val edit #####################
@@ -545,14 +550,13 @@ mode_val_input:
 	moveq.l		#0,d0
 	moveq.l		#0,d1
 	moveq.l		#0,d3
-	move.w		d7,d3
-	lsr.w		#7,d3
-	lsr.w		#7,d3
+	move.b		d5,d3
+	and.b		#3,d3		/* edit field bytes */
 
 	move.b		#19,d0
 	sub.b		d3,d0
 	move.b		#13,d1
-	move.l		d6,d2
+	move.l		d5,d2
 	lsr.l		#8,d2
 	add.b		d3,d3
 	or.w		#0x8000,d3
@@ -567,8 +571,8 @@ mode_val_input:
 	move.b		d3,d1
 	lsr.b		#1,d1		/* length in bytes */
 	sub.b		d1,d0
-	move.b		d6,d1
-	lsr.b		#4,d1
+	move.b		d5,d1
+	lsr.b		#2,d1
 	and.b		#7,d1		/* nibble to edit */
 	add.b		d1,d0
 
@@ -576,7 +580,7 @@ mode_val_input:
 	sub.b		#1,d3		/* chars to shift out */
 	lsl.b		#2,d3
 	add.b		#8,d3
-	move.l		d6,d2
+	move.l		d5,d2
 	lsr.l		d3,d2
 
 	move.b		#13,d1
@@ -589,13 +593,12 @@ mode_val_input:
 	move.w		d0,d1
 	and.w		#0x0f00,d1
 	beq		ai_no_dpad
-	move.w		d7,d1
-	lsr.w		#7,d1
-	lsr.w		#7,d1
+	move.b		d5,d1
+	and.b		#3,d1
 	add.b		d1,d1		/* nibble count */
 	sub.b		#1,d1		/* max n.t.e. val */
-	move.b		d6,d2
-	lsr.b		#4,d2
+	move.b		d5,d2
+	lsr.b		#2,d2
 	and.b		#7,d2		/* nibble to edit */
 
 	move.b		d0,d3
@@ -610,7 +613,7 @@ mode_val_input:
 	add.b		#8,d1
 	lsl.l		d1,d3		/* mask */
 	lsl.l		d1,d4		/* what to add/sub */
-	move.l		d6,d1
+	move.l		d5,d1
 	and.l		d3,d1
 	btst.l		#8,d0
 	beq		0f
@@ -621,8 +624,8 @@ mode_val_input:
 1:
 	and.l		d3,d1
 	eor.l		#0xffffffff,d3
-	and.l		d3,d6
-	or.l		d1,d6
+	and.l		d3,d5
+	or.l		d1,d5
 	jmp		vbl_end
 
 ai_no_ud:
@@ -641,9 +644,9 @@ ai_no_ud:
 	ble		0f
 	move.b		#0,d2
 0:
-	and.b		#0x8f,d6
-	lsl.b		#4,d2
-	or.b		d2,d6
+	and.b		#0xe3,d5
+	lsl.b		#2,d2
+	or.b		d2,d5
 	jmp		vbl_end
 
 ai_no_dpad:
@@ -651,14 +654,13 @@ ai_no_dpad:
 	and.w		#0x1020,d1
 	beq		ai_no_sb
 
-	and.l		#0xf,d6		/* forget val and pos */
 	bra		return_to_main
 
 ai_no_sb:
-	btst.l		#4,d0
+	btst.l		#4,d0		/* A - confirm */
 	beq		ai_no_input
 	bset.l		#7,d6
-	move.w		d7,d1
+	move.w		d7,d1		/* back to prev mode */
 	and.w		#0x3800,d1
 	lsr.w		#3,d1
 	and.w		#0xc0ff,d7
@@ -670,7 +672,7 @@ ai_no_input:
 
 # go back to main mode
 return_to_main:
-	bclr.l		#7,d6
+	bclr.l		#7,d6		/* not edited */
 	change_mode	MMODE_MAIN, MMODE_MAIN
 	write_vdp_reg	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320)
 	jmp		vbl_end
