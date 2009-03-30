@@ -45,7 +45,7 @@ static const struct {
 	{ 0x03eb, 0x202d, "32MX+UF Game Device" },
 };
 
-#define VERSION			"0.9"
+#define VERSION			"0.91"
 
 #define IO_BLK_SIZE		0x2000	/* 8K */
 #define IO_RAM_BLK_SIZE		256
@@ -490,7 +490,7 @@ static int read_write_rom(struct usb_dev_handle *dev, u32 addr, void *buffer, in
 		print_progress(total_bytes, total_bytes);
 	}
 
-	if (count & 1)
+	if ((count & 1) && !is_write)
 		/* work around rw_dev_block() limitation 3 (works for reads only?) */
 		rw_dev_block(dev, 0, dummy, sizeof(dummy), 0);
 
@@ -1012,6 +1012,19 @@ breakloop:
 		ret = read_file(w_fname, &w_fdata, &w_fsize, 0x400000);
 		if (ret < 0)
 			return 1;
+
+		/* align size to 64 */
+		ret = (w_fsize + 63) & ~63;
+		if (w_fsize != ret) {
+			printf("ROM image size is %d, padding to %d\n", w_fsize, ret);
+			w_fdata = realloc(w_fdata, ret);
+			if (w_fdata == NULL) {
+				fprintf(stderr, "low mem\n");
+				return 1;
+			}
+			memset((char *)w_fdata + w_fsize, 0, ret - w_fsize);
+			w_fsize = ret;
+		}
 
 		if (do_erase_size < w_fsize)
 			do_erase_size = w_fsize;
