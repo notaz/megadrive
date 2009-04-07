@@ -49,7 +49,10 @@
 .equ MMODE_VAL_INPUT,	1
 .equ MMODE_EDIT_VAL,	2
 .equ MMODE_GOTO,	3
+.equ MMODE_START_MENU,	4
+.equ MMODE_GOTO_PREDEF,	5
 
+.equ predef_addr_cnt,	((predef_addrs_end-predef_addrs)/4)
 
 ##################################################
 #                                                #
@@ -58,17 +61,20 @@
 ##################################################
 
 
-/* Write val to VDP register reg */
-.macro write_vdp_reg reg val
-	move.w #((\reg << 8) + 0x8000 + \val),(a3)
+# Write val to VDP register reg
+.macro write_vdp_r_dst reg val dst
+	move.w #((\reg << 8) + 0x8000 + \val),\dst
 .endm
 
+# Write val to VDP register reg, vdp addr in a3
+.macro write_vdp_reg reg val
+	write_vdp_r_dst \reg, \val, (a3)
+.endm
 
 /* For immediate addresses */
 .macro VRAM_ADDR reg adr
 	move.l #(((0x4000 + (\adr & 0x3fff)) << 16) + (\adr >> 14)),\reg
 .endm
-
 
 .macro CRAM_ADDR reg adr
 	move.l	#(((0xc000 + (\adr & 0x3fff)) << 16) + (\adr >> 14)),\reg
@@ -141,6 +147,14 @@
 	or.w		#(\mode_back<<11)|(\mode_new<<8),d7
 .endm
 
+.macro menu_text str x y pal
+	lea		\str,a0
+	move.l		#\x,d0
+	move.l		#\y,d1
+	move.l		#0x8000|(\pal<<13),d2
+	jsr		print
+.endm
+
 #################################################
 #                                               #
 #                    DATA                       #
@@ -162,22 +176,69 @@ sprite_data:
 	dc.w       0;  dc.b 0x05;  dc.b 0;  dc.w 0x6002;  dc.w 0
 sprite_data_end:
 
+predef_addrs:
+	dc.l 0x000000, 0x200000, 0x400000, 0xa00000, 0xa10000
+	dc.l 0xa11100, 0xa12000, 0xa13000, 0xc00000
+predef_addrs_end:
+
+safe_addrs:
+	dc.l 0x000000, 0x7fffff
+	dc.l 0xe00000, 0xffffff
+	dc.l 0xa00000, 0xa163ff		/* FIXME */
+	/* TODO: VDP */
+safe_addrs_end:
+
 txt_edit:
 	.ascii	"- edit -\0"
 txt_a_confirm:
 	.ascii	"A-confirm\0"
+txt_about:
+	.ascii	"hexed r1\0"
+txt_goto:
+	.ascii	"Go to address\0"
+txt_goto_predef:
+	.ascii	"Go to (predef)\0"
+txt_dtack:
+	.ascii	"DTACK safety\0"
 
 ##################################################
 #                                                #
 #               MAIN PROGRAM                     #
 #                                                #
 ##################################################
- 
+
+# global regs:
+# a6 = page_start[31:8]|cursor_offs[7:0]
+# d7 = old_inputs[31:16]|edit_bytes[15:14]|g_mode_old[13:11]|g_mode[10:8]|irq_cnt[7:0]
+# d6 = edit_word_save[31:15]|edit_done[7]|no_dtack_detect[4]|autorep_cnt[3:0]
+# d5 = main: tmp
+#      edit: edit_word[31:8]|edit_pos[4:2]|byte_cnt[1:0]
+#      menu: sel
+
 .align 2
 
 main:
 	/* mask irqs during init */
 	move.w		#0x2700,sr
+
+.if 0
+	/* copy */
+	lea		(0,pc),a0
+	move.l		a0,d0
+	swap		d0
+	lsr.l		#4,d0
+	and.b		#0x0f,d0
+	cmp.b		#0,d0
+	bne		0f
+
+	move.w		#8000/2,d0
+	move.l		#0,a0
+	move.l		#0x400000,a1
+1:
+	move.w		(a0)+,(a1)+
+	dbra		d0,1b
+0:
+.endif
 
 	movea.l		#0,a6
 	move.l		#0x8000,d7
@@ -236,21 +297,10 @@ lmaploop0:
         move.w		#0x2000,sr
 
 ##################################################
-#                                                #
-#                 MAIN LOOP                      #
-#                                                #
-##################################################
-
-# global regs:
-# a6 = page_start[31:8]|cursor_offs[7:0]
-# d7 = old_inputs[31:16]|edit_bytes[15:14]|g_mode_old[13:11]|g_mode[10:8]|irq_cnt[7:0]
-# d6 = edit_word_save[31:15]|edit_done[7]|autorep_cnt[3:0]
-# d5 = edit_word[31:8]|edit_pos[4:2]|byte_cnt[1:0]; tmp in main mode
 
 forever:
 	jsr		wait_vsync
 	bra 		forever
-	
 
 
 VBL:
@@ -268,8 +318,8 @@ jumptab:
 	dc.l		mode_val_input
 	dc.l		mode_edit_val	/* edit val in editor */
 	dc.l		mode_goto
-	dc.l		mode_main
-	dc.l		mode_main
+	dc.l		mode_start_menu
+	dc.l		mode_goto_predef
 	dc.l		mode_main
 	dc.l		mode_main
 
@@ -286,36 +336,119 @@ mode_main:
 	add.b		#27-1,d1	/* line where the cursor sits */
 	swap		d1
 
-	movea.l		#0xe004,a2
+	movea.l		#0xe002,a2
 	move.l		#27-1,d5	/* line counter for dbra */
 	or.l		d1,d5
 
-draw_column:
+draw_row:
 	move.l		a2,a0
 	jsr		load_prepare
 
+	btst.l		#15,d7
+	beq		0f
+	move.w		#' ',(a0)
+0:
 	/* addr */
 	move.l		a1,d2
 	moveq.l		#6,d3
 	jsr		print_hex_preped
 
-	/* 4 shorts */
-	moveq.l		#4,d3
-	moveq.l		#4-1,d4
-draw_shorts:
+	btst.l		#4,d6
+	bne		draw_row_safe
+
+	bsr		is_addr_safe
+	bne		draw_row_safe
+
+# draw unreadable areas
+	btst.l		#15,d7
+	bne		draw_row_unsafe_words
+
+draw_row_unsafe_bytes:
+	/* 8 bytes */
+	moveq.l		#8-1,d4
+0:
 	move.w		#' ',(a0)
-	move.w		(a1)+,d2
-	jsr		print_hex_preped
-	dbra		d4,draw_shorts
+	move.l		#'?'|('?'<<16),(a0)
+	dbra		d4,0b
+
+	move.w		#' ',(a0)
 
 	move.l		d5,d0
 	swap		d0
 	cmp.w		d5,d0
-	beq		draw_cursor
+	beq		draw_cursor_unsafe_byte
+	bra		draw_chars_unsafe
 
-draw_chars_pre:
+draw_row_unsafe_words:
+	/* 4 shorts */
+	moveq.l		#4-1,d4
+0:
+	move.w		#' ',(a0)
+	move.l		#'?'|('?'<<16),(a0)
+	move.l		#'?'|('?'<<16),(a0)
+	dbra		d4,0b
+
 	move.l		#(' '<<16)|' ',(a0)
 
+	move.l		d5,d0
+	swap		d0
+	cmp.w		d5,d0
+	beq		draw_cursor_unsafe_word
+
+draw_chars_unsafe:
+	move.l		#'?'|('?'<<16),(a0)
+	move.l		#'?'|('?'<<16),(a0)
+	move.l		#'?'|('?'<<16),(a0)
+	move.l		#'?'|('?'<<16),(a0)
+
+	move.l		#(' '<<16)|' ',(a0)
+	addq.l		#8,a1
+	add.w		#0x80,a2
+	dbra		d5,draw_row
+	bra		draw_status_bar
+
+
+# normal draw
+draw_row_safe:
+	btst.l		#15,d7
+	bne		draw_row_words
+
+draw_row_bytes:
+	/* 8 bytes */
+	moveq.l		#2,d3
+	moveq.l		#8-1,d4
+draw_bytes:
+	move.w		#' ',(a0)
+	move.b		(a1)+,d2
+	jsr		print_hex_preped
+	dbra		d4,draw_bytes
+
+	move.w		#' ',(a0)
+
+	move.l		d5,d0
+	swap		d0
+	cmp.w		d5,d0
+	beq		draw_cursor_byte
+	bra		draw_chars_pre
+
+draw_row_words:
+	/* 4 shorts */
+	moveq.l		#4,d3
+	moveq.l		#4-1,d4
+draw_words:
+	move.w		#' ',(a0)
+	move.w		(a1)+,d2
+	jsr		print_hex_preped
+	dbra		d4,draw_words
+
+	move.l		#(' '<<16)|' ',(a0)
+
+	move.l		d5,d0
+	swap		d0
+	cmp.w		d5,d0
+	beq		draw_cursor_word
+
+draw_chars_pre:
 	/* 8 chars */
 	subq.l		#8,a1
 	moveq.l		#8-1,d4
@@ -330,15 +463,24 @@ draw_chars:
 	move.w		d0,(a0)
 	dbra		d4,draw_chars
 
-	add.w		#0x80,a2
-	dbra		d5,draw_column
+	move.l		#(' '<<16)|' ',(a0)
 
+	add.w		#0x80,a2
+	dbra		d5,draw_row
+
+draw_status_bar:
 	/* status bar */
-	movea.l		#0xe004+64*2*27,a0
+	move.l		a2,a0
 	jsr		load_prepare
+
+	btst.l		#15,d7
+	beq		0f
+	move.w		#' ',(a0)
+0:
 	mk_a6_addr	d2
 	move.l		#0x4006,d3
 	jsr		print_hex_preped
+	move.w		#' ',(a0)
 
 	/* handle input */
 	jsr		get_input		/* x0cbrldu x1sa00du */
@@ -391,14 +533,15 @@ input_nob:
 	beq		input_noc
 
 	change_mode	MMODE_EDIT_VAL, MMODE_MAIN
-	write_vdp_reg	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320 | VDP12_STE)
+	write_vdp_r_dst	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320 | VDP12_STE),(GFXCNTL)
 
 input_noc:
-	btst.l		#5,d0			/* Start - goto */
+	btst.l		#5,d0			/* Start - menu */
 	beq		input_nos
 
-	change_mode	MMODE_GOTO, MMODE_MAIN
-	write_vdp_reg	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320 | VDP12_STE)
+	moveq.l		#0,d5
+	change_mode	MMODE_START_MENU, MMODE_MAIN
+	write_vdp_r_dst	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320 | VDP12_STE),(GFXCNTL)
 
 input_nos:
 vbl_end:
@@ -406,7 +549,23 @@ vbl_end:
 	rte
 
 
-draw_cursor:
+draw_cursor_unsafe_byte:
+	move.l		a6,d0
+	and.l		#7,d0		/* byte offs */
+	move.b		d0,d1
+	add.b		d0,d0
+	add.b		d1,d0		/* d0 *= 3 (chars) */
+	add.b		d0,d0
+	lea		(7*2,a2,d0),a0
+	jsr		load_prepare
+	move.l		#(0x2000|'?'|((0x2000|'?')<<16)),(a0)
+
+	move.l		a2,a0
+	add.w		#31*2,a0
+	jsr		load_prepare	/* restore a0 */
+	jmp		draw_chars_unsafe
+
+draw_cursor_unsafe_word:
 	move.l		a6,d0
 	and.l		#7,d0		/* byte offs */
 	move.l		d0,d1
@@ -414,29 +573,58 @@ draw_cursor:
 	move.b		d1,d2
 	lsl.b		#2,d2
 	add.b		d2,d1		/* num of chars to skip */
-	lsl.b		#1,d1
-	move.w		#0x2004,d3
+	add.b		d1,d1
 
-	btst.l		#15,d7
-	bne		draw_cursor_word
+	lea		(8*2,a2,d1),a0
+	jsr		load_prepare
+	move.l		#(0x2000|'?'|((0x2000|'?')<<16)),d0
+	move.l		d0,(a0)
+	move.l		d0,(a0)
+
+	move.l		a2,a0
+	add.w		#29*2,a0
+	jsr		load_prepare	/* restore a0 */
+	jmp		draw_chars_unsafe
+
 
 draw_cursor_byte:
-	move.b		(-8,a1,d0),d2
-	and.b		#1,d0
-	lsl.b		#2,d0
-	add.b		d0,d1
-	subq.b		#2,d3
-	bra		0f
+	move.l		a6,d0
+	and.l		#7,d0		/* byte offs */
+	move.w		#0x2002,d3
 
-draw_cursor_word:
-	move.w		(-8,a1,d0),d2
-0:
-	lea		(7*2,a2,d1),a0
+	move.b		(-8,a1,d0),d2
+	move.b		d0,d1
+	add.b		d0,d0
+	add.b		d1,d0		/* d0 *= 3 (chars) */
+	add.b		d0,d0
+	lea		(7*2,a2,d0),a0
 	jsr		load_prepare
 	jsr		print_hex_preped
 
 	move.l		a2,a0
-	add.w		#26*2,a0
+	add.w		#31*2,a0
+	jsr		load_prepare	/* restore a0 */
+
+	jmp		draw_chars_pre
+
+draw_cursor_word:
+	move.l		a6,d0
+	and.l		#7,d0		/* byte offs */
+	move.l		d0,d1
+	lsr.b		#1,d1		/* which word */
+	move.b		d1,d2
+	lsl.b		#2,d2
+	add.b		d2,d1		/* num of chars to skip */
+	add.b		d1,d1
+	move.w		#0x2004,d3
+
+	move.w		(-8,a1,d0),d2
+	lea		(8*2,a2,d1),a0
+	jsr		load_prepare
+	jsr		print_hex_preped
+
+	move.l		a2,a0
+	add.w		#29*2,a0
 	jsr		load_prepare	/* restore a0 */
 
 	jmp		draw_chars_pre
@@ -670,11 +858,198 @@ ai_no_input:
 	jmp		vbl_end
 
 
+################### start menu ###################
+
+mode_start_menu:
+	/* frame */
+	bsr		start_menu_box
+
+	/* text */
+	menu_text	txt_about,       13,  9, 1
+	menu_text	txt_goto,        13, 11, 0
+	menu_text	txt_goto_predef, 13, 12, 0
+	menu_text	txt_dtack,       13, 13, 0
+	menu_text	txt_a_confirm,   13, 15, 2
+
+	/* dtack safety on/off */
+	movea.l		#0xe000+26*2+13*64*2,a0
+	jsr		load_prepare
+	move.w		#0x8000|'O',(a0)
+	btst.l		#4,d6
+	bne		0f
+	move.w		#0x8000|'N',(a0)
+	bra		1f
+0:
+	move.w		#0x8000|'F',(a0)
+	move.w		#0x8000|'F',(a0)
+1:
+
+	/* cursor */
+	movea.l		#0xe000+11*2+11*64*2,a0
+	moveq.l		#0,d0
+	move.b		d5,d0
+	and.b		#3,d0
+	lsl.w		#7,d0
+	add.w		d0,a0
+	jsr		load_prepare
+	move.w		#'>',(a0)
+
+	/* input */
+	jsr		get_input	/* x0cbrldu x1sa00du */
+
+	move.w		d0,d1
+	and.w		#3,d1
+	beq		msm_no_ud
+	move.b		d5,d1
+	and.b		#3,d1
+	btst.l		#0,d0
+	sne		d2
+	or.b		#1,d2		/* up -1, down 1 */
+	add.b		d2,d1
+	cmp.b		#0,d1
+	bge		0f
+	move.b		#2,d1
+0:
+	cmp.b		#2,d1
+	ble		0f
+	move.b		#0,d1
+0:
+	and.b		#0xfc,d5
+	or.b		d1,d5
+	jmp		vbl_end
+
+msm_no_ud:
+	btst.l		#4,d0		/* A - confirm */
+	beq		msm_no_a
+	move.b		d5,d1
+	and.b		#3,d1
+	bne		0f
+	change_mode	MMODE_GOTO, MMODE_MAIN
+	bsr		start_menu_box
+	jmp		vbl_end
+0:
+	cmp.b		#1,d1
+	bne		0f
+	moveq.l		#0,d5
+	change_mode	MMODE_GOTO_PREDEF, MMODE_MAIN
+	bsr		start_menu_box
+	jmp		vbl_end
+0:
+	cmp.b		#2,d1
+	bne		0f
+	bchg.l		#4,d6
+	jmp		vbl_end
+0:
+
+msm_no_a:
+	move.w		d0,d1
+	and.w		#0x3000,d1
+	beq		msm_no_bc
+	bra		return_to_main
+
+msm_no_bc:
+	jmp		vbl_end
+
+start_menu_box:
+	movea.l		#0xe000+10*2+8*64*2,a1
+	move.w		#9-1,d1
+0:
+	move.w		a1,a0
+	jsr		load_prepare
+	move.w		#20-1,d0
+1:
+	move.w		#0,(a0)
+	dbra		d0,1b
+
+	add.w		#64*2,a1
+	dbra		d1,0b
+	rts
+
+################### goto predef ##################
+
+mode_goto_predef:
+	/* frame */
+	movea.l		#0xe000+14*2+8*64*2,a1
+	move.l		#predef_addr_cnt+2-1,d1
+0:
+	move.w		a1,a0
+	jsr		load_prepare
+	moveq.l		#10-1,d0
+1:
+	move.w		#0,(a0)
+	dbra		d0,1b
+
+	add.w		#64*2,a1
+	dbra		d1,0b
+
+	/* draw addresses */
+	movea.l		#0xe000+17*2+9*64*2,a1
+	lea		predef_addrs,a2
+	move.w		#predef_addr_cnt-1,d4
+	move.l		#0x8006,d3
+mgp_da_loop:
+	move.w		a1,a0
+	jsr		load_prepare
+	move.l		(a2)+,d2
+	jsr		print_hex_preped
+	add.w		#64*2,a1
+	dbra		d4,mgp_da_loop
+
+	/* cursor */
+	movea.l		#0xe000+15*2+9*64*2,a0
+	moveq.l		#0,d0
+	move.b		d5,d0
+	lsl.w		#7,d0
+	add.w		d0,a0
+	jsr		load_prepare
+	move.w		#'>',(a0)
+
+	/* input */
+	jsr		get_input	/* x0cbrldu x1sa00du */
+
+	move.w		d0,d1
+	and.w		#3,d1
+	beq		mgp_no_ud
+	btst.l		#0,d0
+	sne		d2
+	or.b		#1,d2		/* up -1, down 1 */
+	add.b		d2,d5
+	cmp.b		#0,d5
+	bge		0f
+	move.b		#predef_addr_cnt-1,d5
+0:
+	cmp.b		#predef_addr_cnt-1,d5
+	ble		0f
+	move.b		#0,d5
+0:
+	jmp		vbl_end
+
+mgp_no_ud:
+	btst.l		#4,d0		/* A - confirm */
+	beq		mgp_no_a
+	moveq.l		#0,d0
+	move.b		d5,d0
+	lsl.w		#2,d0
+	lea		predef_addrs,a0
+	move.l		(a0,d0),d5
+	lsl.l		#8,d5
+	jmp		mode_goto_finish
+
+mgp_no_a:
+	move.w		d0,d1
+	and.w		#0x3000,d1
+	beq		mgp_no_bc
+	bra		return_to_main
+
+mgp_no_bc:
+	jmp		vbl_end
+
+
 # go back to main mode
 return_to_main:
 	bclr.l		#7,d6		/* not edited */
 	change_mode	MMODE_MAIN, MMODE_MAIN
-	write_vdp_reg	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320)
+	write_vdp_r_dst	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320),(GFXCNTL)
 	jmp		vbl_end
 
 
@@ -705,6 +1080,37 @@ init_gfx:
 	rts
 
 
+# determine if address packed in a6 is safe
+#  a1 - address to check
+#  destroys d0-d2, strips upper bits from a1
+is_addr_safe:
+	move.l		a1,d1
+	lsl.l		#8,d1
+	lsr.l		#8,d1
+	lea		safe_addrs,a1
+	move.w		#(safe_addrs_end - safe_addrs)/8-1,d2
+0:
+	move.l		(a1)+,d0
+	cmp.l		d0,d1
+	blt		1f
+	move.l		(a1),d0
+	cmp.l		d0,d1
+	ble		addr_safe
+1:
+	addq.l		#4,a1
+	dbra		d2,0b
+
+addr_unsafe:
+	move.l		d1,a1
+	moveq.l		#0,d0
+	rts
+
+addr_safe:
+	move.l		d1,a1
+	moveq.l		#1,d0
+	rts
+
+
 # read single phase from controller
 #  #a0 - addr
 #  d0 - result
@@ -731,12 +1137,12 @@ get_input:
 
 	addq.b		#1,d6
 	move.b		d6,d2
-	and.b		#7,d2		/* do autorepeat every 8 frames */
-	cmp.b		#7,d2
+	and.b		#0x0f,d2	/* do autorepeat */
+	cmp.b		#9,d2
 	bne		1f
 	move.w		d0,d1
 0:
-	and.b		#0xf8,d6
+	and.b		#0xf0,d6
 1:
 	swap		d0
 	move.w		d1,d0
@@ -824,7 +1230,7 @@ _print_end:
 #  d0 - x
 #  d1 - y 
 #  d2 - value
-#  d3 - digit_cnt[0:7]|tile_bits[11:15]
+#  d3 - tile_bits[15:11]|digit_cnt[7:0]
 #  destroys a0, preserves d3
 
 print_hex:

@@ -18,10 +18,10 @@
         dc.l INT,INT,INT,INT,INT,INT,INT,INT
         dc.l INT,INT,INT,INT,INT,INT,INT
         .ascii "SEGA GENESIS                    "
-        .ascii "hex editor (c) notaz                            "
-        .ascii "HEX EDITOR (C) NOTAZ                            "
+        .ascii "hexed (c) notaz, 2009                           "
+        .ascii "HEXED (C) NOTAZ, 2009                           "
         .ascii "GM 00000000-00"
-        .byte 0xa5,0xfb
+        .byte 0x00,0x00
         .ascii "JD              "
         .byte 0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x00
         .byte 0x00,0xff,0x00,0x00,0xff,0xff,0xff,0xff
