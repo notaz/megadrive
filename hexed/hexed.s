@@ -7,6 +7,7 @@
 
 .text
 .globl main
+.globl INT
 .globl VBL
 
 ##################################################
@@ -168,6 +169,8 @@ colors:
 	dc.w	0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000
 	dc.w 0x0000,0x0e44,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000
 	dc.w	0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000
+	dc.w 0x0000,0x044e,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000
+	dc.w	0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000
 colors_end:
 
 
@@ -178,14 +181,16 @@ sprite_data_end:
 
 predef_addrs:
 	dc.l 0x000000, 0x200000, 0x400000, 0xa00000, 0xa10000
-	dc.l 0xa11100, 0xa12000, 0xa13000, 0xc00000
+	dc.l 0xa11100, 0xa12000, 0xa13000, 0xa14000, 0xc00000
 predef_addrs_end:
 
 safe_addrs:
 	dc.l 0x000000, 0x7fffff
 	dc.l 0xe00000, 0xffffff
-	dc.l 0xa00000, 0xa163ff		/* FIXME */
-	/* TODO: VDP */
+	dc.l 0xa00000, 0xa100ff
+	dc.l 0xa11000, 0xa113ff
+	dc.l 0xa12000, 0xa120ff
+	dc.l 0xa13000, 0xa130ff
 safe_addrs_end:
 
 txt_edit:
@@ -200,6 +205,10 @@ txt_goto_predef:
 	.ascii	"Go to (predef)\0"
 txt_dtack:
 	.ascii	"DTACK safety\0"
+txt_dtack_err:
+	.ascii	"DTACK err?\0"
+txt_exc:
+	.ascii	"Exception \0"
 
 ##################################################
 #                                                #
@@ -294,6 +303,15 @@ lmaploop0:
 0:	move.l		(a1)+,(a0)
 	dbra		d3,0b
 
+	/* wait for vsync before unmask */
+	move.l 		#GFXCNTL,a3
+0:
+	move.w		(a3),d0
+	and.b		#8,d0
+	nop
+	nop
+	beq		0b
+
         move.w		#0x2000,sr
 
 ##################################################
@@ -302,6 +320,17 @@ forever:
 	jsr		wait_vsync
 	bra 		forever
 
+
+INT:
+	/* let's hope VRAM is already set up.. */
+	lea		txt_exc,a0
+	move.l		#9,d0
+	move.l		#27,d1
+	move.l		#0xe000,d2
+	jsr		print
+	bra		forever
+
+##################################################
 
 VBL:
 	addq.b		#1,d7
@@ -326,7 +355,14 @@ jumptab:
 ##################### main #######################
 
 mode_main:
-	clr.l		d1
+	/* assume we will hang */
+	lea		txt_dtack_err,a0
+	move.l		#9,d0
+	move.l		#27,d1
+	move.l		#0xe000,d2
+	jsr		print
+
+	moveq.l		#0,d1
 	move.l		a6,d0
 	move.b		d0,d1
 	lsr.l		#8,d0
@@ -356,20 +392,41 @@ draw_row:
 	btst.l		#4,d6
 	bne		draw_row_safe
 
-	bsr		is_addr_safe
-	bne		draw_row_safe
+	bsr		get_safety_mask
+	cmp.b		#0xf,d0
+	beq		draw_row_safe
 
-# draw unreadable areas
+# unsafe or partially safe
+draw_row_hsafe:
+	move.l		d0,d4
+	swap		d4		/* mask in upper word */
 	btst.l		#15,d7
-	bne		draw_row_unsafe_words
+	bne		draw_row_hsafe_words_pre
 
-draw_row_unsafe_bytes:
+draw_row_hsafe_bytes_pre:
 	/* 8 bytes */
-	moveq.l		#8-1,d4
-0:
+	moveq.l		#2,d3
+	move.w		#3,d4
+
+draw_row_hsafe_bytes:
+	move.w		#' ',(a0)
+	move.b		d4,d0
+	add.b		#16,d0
+	btst.l		d0,d4
+	bne		0f
+	move.l		#'?'|('?'<<16),(a0)
 	move.w		#' ',(a0)
 	move.l		#'?'|('?'<<16),(a0)
-	dbra		d4,0b
+	bra		1f
+0:
+	move.b		(0,a1),d2
+	jsr		print_hex_preped
+	move.w		#' ',(a0)
+	move.b		(1,a1),d2
+	jsr		print_hex_preped
+1:
+	addq.l		#2,a1
+	dbra		d4,draw_row_hsafe_bytes
 
 	move.w		#' ',(a0)
 
@@ -377,16 +434,28 @@ draw_row_unsafe_bytes:
 	swap		d0
 	cmp.w		d5,d0
 	beq		draw_cursor_unsafe_byte
-	bra		draw_chars_unsafe
+	bra		draw_chars_hsafe_pre
 
-draw_row_unsafe_words:
+draw_row_hsafe_words_pre:
 	/* 4 shorts */
-	moveq.l		#4-1,d4
-0:
+	moveq.l		#4,d3
+	move.w		#3,d4
+
+draw_row_hsafe_words:
 	move.w		#' ',(a0)
+	move.b		d4,d0
+	add.b		#16,d0
+	btst.l		d0,d4
+	bne		0f
 	move.l		#'?'|('?'<<16),(a0)
 	move.l		#'?'|('?'<<16),(a0)
-	dbra		d4,0b
+	bra		1f
+0:
+	move.w		(a1),d2
+	jsr		print_hex_preped
+1:
+	addq.l		#2,a1
+	dbra		d4,draw_row_hsafe_words
 
 	move.l		#(' '<<16)|' ',(a0)
 
@@ -395,14 +464,52 @@ draw_row_unsafe_words:
 	cmp.w		d5,d0
 	beq		draw_cursor_unsafe_word
 
-draw_chars_unsafe:
+draw_chars_hsafe_pre:
+	subq.l		#8,a1
+	move.w		#3,d4
+	moveq.l		#0,d0
+
+draw_chars_hsafe:
+	move.b		d4,d0
+	add.b		#16,d0
+	btst.l		d0,d4
+	bne		0f
 	move.l		#'?'|('?'<<16),(a0)
-	move.l		#'?'|('?'<<16),(a0)
-	move.l		#'?'|('?'<<16),(a0)
-	move.l		#'?'|('?'<<16),(a0)
+	bra		draw_chars_hsafe_next
+0:
+	btst.l		#15,d7		/* must perform correct read type */
+	bne		0f		/* doing byte reads on security reg hangs */
+	move.b		(0,a1),d0
+	lsl.l		#8,d0
+	move.b		(1,a1),d0
+	bra		1f
+0:
+	move.w		(a1),d0
+1:
+	ror.l		#8,d0
+	move.b		d0,d1
+	sub.b		#0x20,d1
+	cmp.b		#0x60,d1
+	blo		0f
+	move.b		#'.',d0
+0:
+	move.w		d0,(a0)
+
+	move.b		#0,d0
+	rol.l		#8,d0
+	move.b		d0,d1
+	sub.b		#0x20,d1
+	cmp.b		#0x60,d1
+	blo		0f
+	move.b		#'.',d0
+0:
+	move.w		d0,(a0)
+
+draw_chars_hsafe_next:
+	addq.l		#2,a1
+	dbra		d4,draw_chars_hsafe
 
 	move.l		#(' '<<16)|' ',(a0)
-	addq.l		#8,a1
 	add.w		#0x80,a2
 	dbra		d5,draw_row
 	bra		draw_status_bar
@@ -468,6 +575,7 @@ draw_chars:
 	add.w		#0x80,a2
 	dbra		d5,draw_row
 
+
 draw_status_bar:
 	/* status bar */
 	move.l		a2,a0
@@ -480,7 +588,14 @@ draw_status_bar:
 	mk_a6_addr	d2
 	move.l		#0x4006,d3
 	jsr		print_hex_preped
-	move.w		#' ',(a0)
+
+	/* clear error */
+	moveq.l		#5-1,d0
+0:
+	move.l		#' '|(' '<<16),(a0)
+	move.l		#' '|(' '<<16),(a0)
+	dbra		d0,0b
+
 
 	/* handle input */
 	jsr		get_input		/* x0cbrldu x1sa00du */
@@ -563,7 +678,7 @@ draw_cursor_unsafe_byte:
 	move.l		a2,a0
 	add.w		#31*2,a0
 	jsr		load_prepare	/* restore a0 */
-	jmp		draw_chars_unsafe
+	jmp		draw_chars_hsafe_pre
 
 draw_cursor_unsafe_word:
 	move.l		a6,d0
@@ -584,7 +699,7 @@ draw_cursor_unsafe_word:
 	move.l		a2,a0
 	add.w		#29*2,a0
 	jsr		load_prepare	/* restore a0 */
-	jmp		draw_chars_unsafe
+	jmp		draw_chars_hsafe_pre
 
 
 draw_cursor_byte:
@@ -1080,10 +1195,10 @@ init_gfx:
 	rts
 
 
-# determine if address packed in a6 is safe
+# get mask of bits representing safe words
 #  a1 - address to check
 #  destroys d0-d2, strips upper bits from a1
-is_addr_safe:
+get_safety_mask:
 	move.l		a1,d1
 	lsl.l		#8,d1
 	lsr.l		#8,d1
@@ -1100,14 +1215,48 @@ is_addr_safe:
 	addq.l		#4,a1
 	dbra		d2,0b
 
-addr_unsafe:
 	move.l		d1,a1
-	moveq.l		#0,d0
+
+	moveq.l		#0x0c,d0
+	cmp.l		#0xa14000,d1
+	beq		gsm_rts
+
+	moveq.l		#0x08,d0
+	cmp.l		#0xa14100,d1
+	beq		gsm_rts
+
+	/* check for VDP address */
+	move.l		d1,d0
+	swap		d0
+	and.b		#0xe0,d0
+	cmp.b		#0xc0,d0
+	bne		addr_unsafe	/* not vdp */
+
+	move.l		d1,d0
+	and.l		#0x0700e0,d0
+	bne		addr_unsafe
+
+	move.l		d1,d0
+	and.b		#0x1f,d0
+	cmp.b		#0x04,d0
+	blt		addr_hsafe_3	/* data port */
+	cmp.b		#0x10,d0
+	blt		addr_safe	/* below PSG */
+	cmp.b		#0x18,d0
+	bge		addr_safe	/* above PSG */
+
+addr_unsafe:
+	moveq.l		#0,d0		/* skip line */
+	rts
+
+addr_hsafe_3:
+	moveq.l		#3,d0		/* skip 2 words */
 	rts
 
 addr_safe:
 	move.l		d1,a1
-	moveq.l		#1,d0
+	moveq.l		#0xf,d0
+gsm_rts:
 	rts
 
 
