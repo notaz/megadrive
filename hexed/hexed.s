@@ -29,7 +29,7 @@
 .equ VDP1_E_DMA,	0x10
 .equ VDP1_NTSC,		0x00
 .equ VDP1_PAL,		0x08
-.equ VDP1_RESERVED,	0x04
+.equ VDP1_MODE5,	0x04
 
 .equ VDP12_STE,		0x08
 .equ VDP12_SCREEN_V224,	0x00
@@ -52,6 +52,7 @@
 .equ MMODE_GOTO,	3
 .equ MMODE_START_MENU,	4
 .equ MMODE_GOTO_PREDEF,	5
+.equ MMODE_JMP_ADDR,	6
 
 .equ predef_addr_cnt,	((predef_addrs_end-predef_addrs)/4)
 
@@ -72,13 +73,9 @@
 	write_vdp_r_dst \reg, \val, (a3)
 .endm
 
-/* For immediate addresses */
-.macro VRAM_ADDR reg adr
-	move.l #(((0x4000 + (\adr & 0x3fff)) << 16) + (\adr >> 14)),\reg
-.endm
-
-.macro CRAM_ADDR reg adr
-	move.l	#(((0xc000 + (\adr & 0x3fff)) << 16) + (\adr >> 14)),\reg
+# Set up address in VDP, control port in dst
+.macro VRAM_ADDR adr dst
+	move.l #(((0x4000 | (\adr & 0x3fff)) << 16) | (\adr >> 14)),\dst
 .endm
 
 
@@ -102,16 +99,6 @@
 .macro CRAM_ADDR_var adr
 	XRAM_ADDR_var \adr
 	or.l #0xc0000000,d0
-.endm
-
-
-.macro VSCROLL_ADDR reg adr
-	move.l	#(((0x4000 + (\adr & 0x3fff)) << 16) + ((\adr >> 14) | 0x10)),\reg
-.endm
-
-
-.macro HSCROLL_ADDR reg adr
-	move.l #(((0x4000 + (\adr & 0x3fff)) << 16) + (\adr >> 14)),\reg
 .endm
 
 
@@ -203,6 +190,8 @@ txt_goto:
 	.ascii	"Go to address\0"
 txt_goto_predef:
 	.ascii	"Go to (predef)\0"
+txt_jmp_addr:
+	.ascii	"Jump to address\0"
 txt_dtack:
 	.ascii	"DTACK safety\0"
 txt_dtack_err:
@@ -266,11 +255,24 @@ main:
 	moveq.l		#(colors_end-colors)/2,d0
 	jsr		load_colors
 
-	/* load patterns */
-	movea.l		#0,a0
-	movea.l		#font,a1
-	move.l		#128,d0
-	jsr		load_tiles
+	/* load font patterns */
+	lea 		GFXDATA,a0
+	lea		font,a1
+	VRAM_ADDR	0,(GFXCNTL)
+	move.w		#128*8,d3
+font_loop:
+	moveq.l		#8-1,d2
+	moveq.l		#0,d1
+	move.b		(a1)+,d0
+0:
+	lsr.b		#1,d0
+	roxl.l		#1,d1
+	ror.l		#5,d1
+	dbra		d2,0b
+
+	rol.l		#1,d1		/* fixup */
+	move.l		d1,(a0)
+	dbra		d3,font_loop
 
 	/* generate A layer map */
 	movea.l		#0xe000,a1
@@ -334,7 +336,7 @@ INT:
 
 VBL:
 	addq.b		#1,d7
-	movem.l		d0-d4/a0-a5,-(a7)
+#	movem.l		d0-d4/a0-a5,-(a7)
 
 	moveq.l		#0,d0
 	move.w		d7,d0
@@ -349,7 +351,7 @@ jumptab:
 	dc.l		mode_goto
 	dc.l		mode_start_menu
 	dc.l		mode_goto_predef
-	dc.l		mode_main
+	dc.l		mode_jmp_addr
 	dc.l		mode_main
 
 ##################### main #######################
@@ -660,7 +662,7 @@ input_noc:
 
 input_nos:
 vbl_end:
-	movem.l		(a7)+,d0-d4/a0-a5
+#	movem.l		(a7)+,d0-d4/a0-a5
 	rte
 
 
@@ -983,11 +985,12 @@ mode_start_menu:
 	menu_text	txt_about,       13,  9, 1
 	menu_text	txt_goto,        13, 11, 0
 	menu_text	txt_goto_predef, 13, 12, 0
-	menu_text	txt_dtack,       13, 13, 0
-	menu_text	txt_a_confirm,   13, 15, 2
+	menu_text	txt_jmp_addr,    13, 13, 0
+	menu_text	txt_dtack,       13, 14, 0
+	menu_text	txt_a_confirm,   13, 16, 2
 
 	/* dtack safety on/off */
-	movea.l		#0xe000+26*2+13*64*2,a0
+	movea.l		#0xe000+26*2+14*64*2,a0
 	jsr		load_prepare
 	move.w		#0x8000|'O',(a0)
 	btst.l		#4,d6
@@ -1023,9 +1026,9 @@ mode_start_menu:
 	add.b		d2,d1
 	cmp.b		#0,d1
 	bge		0f
-	move.b		#2,d1
+	move.b		#3,d1
 0:
-	cmp.b		#2,d1
+	cmp.b		#3,d1
 	ble		0f
 	move.b		#0,d1
 0:
@@ -1052,6 +1055,12 @@ msm_no_ud:
 0:
 	cmp.b		#2,d1
 	bne		0f
+	change_mode	MMODE_JMP_ADDR, MMODE_MAIN
+	bsr		start_menu_box
+	jmp		vbl_end
+0:
+	cmp.b		#3,d1
+	bne		0f
 	bchg.l		#4,d6
 	jmp		vbl_end
 0:
@@ -1067,7 +1076,7 @@ msm_no_bc:
 
 start_menu_box:
 	movea.l		#0xe000+10*2+8*64*2,a1
-	move.w		#9-1,d1
+	move.w		#10-1,d1
 0:
 	move.w		a1,a0
 	jsr		load_prepare
@@ -1159,6 +1168,24 @@ mgp_no_a:
 mgp_no_bc:
 	jmp		vbl_end
 
+##################### jmp ########################
+
+mode_jmp_addr:
+	btst.l		#7,d6
+	bne		mode_jmp_finish
+
+	moveq.l		#0,d5
+	or.b		#3,d5		/* 3 bytes */
+	bclr.l		#7,d6
+	change_mode	MMODE_VAL_INPUT, MMODE_JMP_ADDR
+	jmp		vbl_end
+
+mode_jmp_finish:
+	lsr.l		#8,d5
+	write_vdp_r_dst	1,(VDP1_E_DISPLAY | VDP1_MODE5),(GFXCNTL)	/* disable vint */
+	move.l		d5,a0
+	jmp		(a0)
+
 
 # go back to main mode
 return_to_main:
@@ -1177,7 +1204,7 @@ return_to_main:
 init_gfx:
 	move.l 		#GFXCNTL,a3
 	write_vdp_reg 	0,(VDP0_E_DISPLAY | VDP0_PLTT_FULL)
-	write_vdp_reg 	1,(VDP1_E_VBI | VDP1_E_DISPLAY | VDP1_E_DMA | VDP1_RESERVED)
+	write_vdp_reg 	1,(VDP1_E_VBI | VDP1_E_DISPLAY | VDP1_MODE5)
 	write_vdp_reg 	2,(0xe000 >> 10)	/* Screen map a adress */
 	write_vdp_reg 	3,(0xe000 >> 10)	/* Window address */
 	write_vdp_reg 	4,(0xc000 >> 13)	/* Screen map b address */
@@ -1297,27 +1324,6 @@ get_input:
 	move.w		d1,d0
 	rts
 
-# Load tile data from ROM
-#  a0: VRAM base
-#  a1: pattern address
-#  d0: number of tiles to load
-#  destroys d1
-
-load_tiles:
-	move.l		d0,d1
-	VRAM_ADDR_var 	a0
-	move.l 		d0,(GFXCNTL).l
-	
-	move.l 		#GFXDATA,a0
-	lsl.w		#3,d1
-	subq.l 		#1,d1
-0:
-	move.l 		(a1)+,(a0)
-	dbra 		d1,0b
-
-	rts
-
-
 # Prepare to write to VDP RAM @a0
 # sets a0 to VDP data port for convenience
 #  a0: VRAM base
@@ -1412,11 +1418,7 @@ _print_hex_loop:
 	rts
 
 
-#################################################
-#                                               #
-#       Wait for next VBlank interrupt          #
-#                                               #
-#################################################
+# wait vertical sync
 
 wait_vsync:
 	move.b		d7,d0
