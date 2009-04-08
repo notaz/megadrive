@@ -19,3 +19,18 @@ a.out : $(OBJS)
 clean:
 	$(RM) $(TARGET) $(OBJS) $(TARGET).map a.out
 
+
+# ----------- release -----------
+ifneq ($(findstring rel,$(MAKECMDGOALS)),)
+ifeq ($(VER),)
+$(error need VER)
+endif
+endif
+
+rel: hexed.bin readme.txt src
+	zip -9 -r hexed_r$(VER).zip $^
+	rm -rf src
+
+src: hexed.s font.s sega_gcc.s md.ld Makefile
+	mkdir src
+	cp $^ src/
