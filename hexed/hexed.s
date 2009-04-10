@@ -29,6 +29,9 @@
 #   --register-prefix-optional --bitwise-or
 #
 
+.equ USE_VINT,        1
+.equ RELOCATE_TO_RAM, 0
+
 .text
 .globl main
 .globl INT
@@ -160,7 +163,7 @@
 .endm
 
 .macro menu_text str x y pal
-	lea		\str,a0
+	lea		(\str,pc),a0
 	move.l		#\x,d0
 	move.l		#\y,d1
 	move.l		#0x8000|(\pal<<13),d2
@@ -209,7 +212,7 @@ txt_edit:
 txt_a_confirm:
 	.ascii	"A-confirm\0"
 txt_about:
-	.ascii	"hexed r1\0"
+	.ascii	"hexed r2\0"
 txt_goto:
 	.ascii	"Go to address\0"
 txt_goto_predef:
@@ -243,22 +246,27 @@ main:
 	/* mask irqs during init */
 	move.w		#0x2700,sr
 
-.if 0
-	/* copy */
+.if RELOCATE_TO_RAM
 	lea		(0,pc),a0
 	move.l		a0,d0
 	swap		d0
-	lsr.l		#4,d0
+	lsr.b		#4,d0
 	and.b		#0x0f,d0
 	cmp.b		#0,d0
 	bne		0f
 
-	move.w		#8000/2,d0
+	/* copy, assume 8K size */
+	move.w		#0x2000/8-1,d0
 	move.l		#0,a0
-	move.l		#0x400000,a1
+	move.l		#0xFF0100,a1
 1:
-	move.w		(a0)+,(a1)+
+	move.l		(a0)+,(a1)+
+	move.l		(a0)+,(a1)+
 	dbra		d0,1b
+0:
+	lea		(0f,pc),a0
+	add.l		#0xFF0100,a0
+	jmp		(a0)
 0:
 .endif
 
@@ -275,13 +283,13 @@ main:
 
 	/* Load color data */
 	movea.l		#0,a0
-	movea.l		#colors,a1
+	lea		(colors,pc),a1
 	moveq.l		#(colors_end-colors)/2,d0
 	jsr		load_colors
 
 	/* load font patterns */
-	lea 		GFXDATA,a0
-	lea		font,a1
+	movea.l		#GFXDATA,a0
+	lea		(font,pc),a1
 	VRAM_ADDR	0,(GFXCNTL)
 	move.w		#128*8,d3
 font_loop:
@@ -323,45 +331,41 @@ lmaploop0:
 	/* upload sprite data */
 	movea.l		#0xfc00,a0
 	jsr		load_prepare
-	movea.l		#sprite_data,a1
+	lea		(sprite_data,pc),a1
 
 	move.l		#(sprite_data_end-sprite_data)/2-1,d3
 0:	move.l		(a1)+,(a0)
 	dbra		d3,0b
 
+.if USE_VINT
 	/* wait for vsync before unmask */
-	move.l 		#GFXCNTL,a3
-0:
-	move.w		(a3),d0
-	and.b		#8,d0
-	nop
-	nop
-	bne		0b
-0:
-	move.w		(a3),d0
-	and.b		#8,d0
-	nop
-	nop
-	beq		0b
+	jsr		wait_vsync_poll
 
 	/* wait a bit to avoid nested vint */
 	move.w		#20,d0
 0:
 	dbra		d0,0b		/* 10 cycles to go back */
 
-	/* enable vint */
+	/* enable and unmask vint */
+	write_vdp_r_dst 1,(VDP1_E_VBI | VDP1_E_DISPLAY | VDP1_MODE5),(GFXCNTL)
 	move.w		#0x2000,sr
+.endif
 
 ##################################################
 
 forever:
+.if USE_VINT
 	jsr		wait_vsync
+.else
+	jsr		wait_vsync_poll
+	jsr		VBL
+.endif
 	bra 		forever
 
 
 INT:
 	/* let's hope VRAM is already set up.. */
-	lea		txt_exc,a0
+	lea		(txt_exc,pc),a0
 	move.l		#9,d0
 	move.l		#27,d1
 	move.l		#0xe000,d2
@@ -378,23 +382,23 @@ VBL:
 	move.w		d7,d0
 	lsr.w		#6,d0
 	and.w		#0x1c,d0
-	move.l		(jumptab,pc,d0),a0
+	lea		(jumptab,pc,d0),a0
 	jmp		(a0)
 jumptab:
-	dc.l		mode_main
-	dc.l		mode_val_input
-	dc.l		mode_edit_val	/* edit val in editor */
-	dc.l		mode_goto
-	dc.l		mode_start_menu
-	dc.l		mode_goto_predef
-	dc.l		mode_jmp_addr
-	dc.l		mode_main
+	bra		mode_main
+	bra		mode_val_input
+	bra		mode_edit_val	/* edit val in editor */
+	bra		mode_goto
+	bra		mode_start_menu
+	bra		mode_goto_predef
+	bra		mode_jmp_addr
+	bra		mode_main
 
 ##################### main #######################
 
 mode_main:
 	/* assume we will hang */
-	lea		txt_dtack_err,a0
+	lea		(txt_dtack_err,pc),a0
 	move.l		#9,d0
 	move.l		#27,d1
 	move.l		#0xe000,d2
@@ -699,7 +703,11 @@ input_noc:
 input_nos:
 vbl_end:
 #	movem.l		(a7)+,d0-d4/a0-a5
+.if USE_VINT
 	rte
+.else
+	rts
+.endif
 
 
 draw_cursor_unsafe_byte:
@@ -716,7 +724,7 @@ draw_cursor_unsafe_byte:
 	move.l		a2,a0
 	add.w		#31*2,a0
 	jsr		load_prepare	/* restore a0 */
-	jmp		draw_chars_hsafe_pre
+	bra		draw_chars_hsafe_pre
 
 draw_cursor_unsafe_word:
 	move.l		a6,d0
@@ -737,7 +745,7 @@ draw_cursor_unsafe_word:
 	move.l		a2,a0
 	add.w		#29*2,a0
 	jsr		load_prepare	/* restore a0 */
-	jmp		draw_chars_hsafe_pre
+	bra		draw_chars_hsafe_pre
 
 
 draw_cursor_byte:
@@ -758,7 +766,7 @@ draw_cursor_byte:
 	add.w		#31*2,a0
 	jsr		load_prepare	/* restore a0 */
 
-	jmp		draw_chars_pre
+	bra		draw_chars_pre
 
 draw_cursor_word:
 	move.l		a6,d0
@@ -780,7 +788,7 @@ draw_cursor_word:
 	add.w		#29*2,a0
 	jsr		load_prepare	/* restore a0 */
 
-	jmp		draw_chars_pre
+	bra		draw_chars_pre
 
 
 #################### hedit #######################
@@ -806,7 +814,7 @@ mode_edit_val:
 1:
 
 	change_mode	MMODE_VAL_INPUT, MMODE_EDIT_VAL
-	jmp		vbl_end
+	bra		vbl_end
 
 mode_hedit_finish:
 	/* write the val */
@@ -838,7 +846,7 @@ mode_goto:
 	or.b		#3,d5		/* 3 bytes */
 	bclr.l		#7,d6
 	change_mode	MMODE_VAL_INPUT, MMODE_GOTO
-	jmp		vbl_end
+	bra		vbl_end
 
 mode_goto_finish:
 	lsr.l		#8,d5
@@ -875,13 +883,13 @@ mode_val_input:
 	dbra		d1,0b
 
 	/* text */
-	lea		txt_edit,a0
+	lea		(txt_edit,pc),a0
 	move.l		#15,d0
 	move.l		#11,d1
 	move.l		#0xc000,d2
 	jsr		print
 
-	lea		txt_a_confirm,a0
+	lea		(txt_a_confirm,pc),a0
 	move.l		#15,d0
 	move.l		#15,d1
 	move.l		#0xc000,d2
@@ -967,7 +975,7 @@ mode_val_input:
 	eor.l		#0xffffffff,d3
 	and.l		d3,d5
 	or.l		d1,d5
-	jmp		vbl_end
+	bra		vbl_end
 
 ai_no_ud:
 	btst.l		#10,d0
@@ -988,7 +996,7 @@ ai_no_ud:
 	and.b		#0xe3,d5
 	lsl.b		#2,d2
 	or.b		d2,d5
-	jmp		vbl_end
+	bra		vbl_end
 
 ai_no_dpad:
 	move.w		d0,d1
@@ -1008,7 +1016,7 @@ ai_no_sb:
 	or.w		d1,d7
 
 ai_no_input:
-	jmp		vbl_end
+	bra		vbl_end
 
 
 ################### start menu ###################
@@ -1070,7 +1078,7 @@ mode_start_menu:
 0:
 	and.b		#0xfc,d5
 	or.b		d1,d5
-	jmp		vbl_end
+	bra		vbl_end
 
 msm_no_ud:
 	btst.l		#4,d0		/* A - confirm */
@@ -1080,25 +1088,25 @@ msm_no_ud:
 	bne		0f
 	change_mode	MMODE_GOTO, MMODE_MAIN
 	bsr		start_menu_box
-	jmp		vbl_end
+	bra		vbl_end
 0:
 	cmp.b		#1,d1
 	bne		0f
 	moveq.l		#0,d5
 	change_mode	MMODE_GOTO_PREDEF, MMODE_MAIN
 	bsr		start_menu_box
-	jmp		vbl_end
+	bra		vbl_end
 0:
 	cmp.b		#2,d1
 	bne		0f
 	change_mode	MMODE_JMP_ADDR, MMODE_MAIN
 	bsr		start_menu_box
-	jmp		vbl_end
+	bra		vbl_end
 0:
 	cmp.b		#3,d1
 	bne		0f
 	bchg.l		#4,d6
-	jmp		vbl_end
+	bra		vbl_end
 0:
 
 msm_no_a:
@@ -1108,7 +1116,7 @@ msm_no_a:
 	bra		return_to_main
 
 msm_no_bc:
-	jmp		vbl_end
+	bra		vbl_end
 
 start_menu_box:
 	movea.l		#0xe000+10*2+8*64*2,a1
@@ -1144,7 +1152,7 @@ mode_goto_predef:
 
 	/* draw addresses */
 	movea.l		#0xe000+17*2+9*64*2,a1
-	lea		predef_addrs,a2
+	lea		(predef_addrs,pc),a2
 	move.w		#predef_addr_cnt-1,d4
 	move.l		#0x8006,d3
 mgp_da_loop:
@@ -1182,7 +1190,7 @@ mgp_da_loop:
 	ble		0f
 	move.b		#0,d5
 0:
-	jmp		vbl_end
+	bra		vbl_end
 
 mgp_no_ud:
 	btst.l		#4,d0		/* A - confirm */
@@ -1190,10 +1198,10 @@ mgp_no_ud:
 	moveq.l		#0,d0
 	move.b		d5,d0
 	lsl.w		#2,d0
-	lea		predef_addrs,a0
+	lea		(predef_addrs,pc),a0
 	move.l		(a0,d0),d5
 	lsl.l		#8,d5
-	jmp		mode_goto_finish
+	bra		mode_goto_finish
 
 mgp_no_a:
 	move.w		d0,d1
@@ -1202,7 +1210,7 @@ mgp_no_a:
 	bra		return_to_main
 
 mgp_no_bc:
-	jmp		vbl_end
+	bra		vbl_end
 
 ##################### jmp ########################
 
@@ -1214,7 +1222,7 @@ mode_jmp_addr:
 	or.b		#3,d5		/* 3 bytes */
 	bclr.l		#7,d6
 	change_mode	MMODE_VAL_INPUT, MMODE_JMP_ADDR
-	jmp		vbl_end
+	bra		vbl_end
 
 mode_jmp_finish:
 	lsr.l		#8,d5
@@ -1228,7 +1236,7 @@ return_to_main:
 	bclr.l		#7,d6		/* not edited */
 	change_mode	MMODE_MAIN, MMODE_MAIN
 	write_vdp_r_dst	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320),(GFXCNTL)
-	jmp		vbl_end
+	bra		vbl_end
 
 
 #################################################
@@ -1240,7 +1248,7 @@ return_to_main:
 init_gfx:
 	move.l 		#GFXCNTL,a3
 	write_vdp_reg 	0,(VDP0_E_DISPLAY | VDP0_PLTT_FULL)
-	write_vdp_reg 	1,(VDP1_E_VBI | VDP1_E_DISPLAY | VDP1_MODE5)
+	write_vdp_reg 	1,(VDP1_E_DISPLAY | VDP1_MODE5)
 	write_vdp_reg 	2,(0xe000 >> 10)	/* Screen map a adress */
 	write_vdp_reg 	3,(0xe000 >> 10)	/* Window address */
 	write_vdp_reg 	4,(0xc000 >> 13)	/* Screen map b address */
@@ -1265,7 +1273,7 @@ get_safety_mask:
 	move.l		a1,d1
 	lsl.l		#8,d1
 	lsr.l		#8,d1
-	lea		safe_addrs,a1
+	lea		(safe_addrs,pc),a1
 	move.w		#(safe_addrs_end - safe_addrs)/8-1,d2
 0:
 	move.l		(a1)+,d0
@@ -1411,7 +1419,7 @@ _print_loop:
 	beq		_print_end
 
 	move.w		d0,(a0)
-	jmp		_print_loop
+	bra		_print_loop
 
 _print_end:
 	rts
@@ -1454,7 +1462,7 @@ _print_hex_loop:
 	rts
 
 
-# wait vertical sync
+# wait vertical sync interrupt
 
 wait_vsync:
 	move.b		d7,d0
@@ -1462,6 +1470,26 @@ _wait_change:
 	stop		#0x2000
 	cmp.b		d7,d0
 	beq		_wait_change
+	rts
+
+
+# wait vsync start (polling)
+#  destroys a0,d0
+
+wait_vsync_poll:
+	move.l 		#GFXCNTL,a0
+0:
+	move.w		(a0),d0
+	and.b		#8,d0
+	nop
+	nop
+	bne		0b
+0:
+	move.w		(a0),d0
+	and.b		#8,d0
+	nop
+	nop
+	beq		0b
 	rts
 
 

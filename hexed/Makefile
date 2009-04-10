@@ -3,7 +3,7 @@ AS = $(CROSS)as
 LD = $(CROSS)ld
 OBJCOPY = $(CROSS)objcopy
 
-ASFLAGS = -m68000 --register-prefix-optional --bitwise-or 
+ASFLAGS += -m68000 --register-prefix-optional --bitwise-or -pic
 
 TARGET = hexed.bin
 OBJS = sega_gcc.o hexed.o font.o

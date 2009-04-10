@@ -34,7 +34,7 @@ WrongVersion:
 	move    %a7,%usp
 SkipSetup:
 	tst.w   0xC00004
-	jmp     main
+	bra     main
 
 * INT:
 *	rte
