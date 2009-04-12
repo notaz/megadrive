@@ -80,6 +80,7 @@
 .equ MMODE_START_MENU,	4
 .equ MMODE_GOTO_PREDEF,	5
 .equ MMODE_JMP_ADDR,	6
+.equ MMODE_DUMP,	7
 
 .equ predef_addr_cnt,	((predef_addrs_end-predef_addrs)/4)
 
@@ -102,7 +103,11 @@
 
 # Set up address in VDP, control port in dst
 .macro VRAM_ADDR adr dst
-	move.l #(((0x4000 | (\adr & 0x3fff)) << 16) | (\adr >> 14)),\dst
+	move.l #(0x40000000 | ((\adr & 0x3fff) << 16) | (\adr >> 14)),\dst
+.endm
+
+.macro VSRAM_ADDR adr dst
+	move.l #(0x40000010 | ((\adr & 0x3fff) << 16) | (\adr >> 14)),\dst
 .endm
 
 
@@ -162,6 +167,7 @@
 	or.w		#(\mode_back<<11)|(\mode_new<<8),d7
 .endm
 
+#  destroys a0,d0-d2
 .macro menu_text str x y pal
 	lea		(\str,pc),a0
 	move.l		#\x,d0
@@ -207,6 +213,13 @@ safe_addrs:
 	dc.l 0xa13000, 0xa130ff
 safe_addrs_end:
 
+transfer_mode:
+	dc.l 0x000000		/* 1 for recv */
+transfer_addr:
+	dc.l 0x000000
+transfer_len:
+	dc.l 0x000800
+
 txt_edit:
 	.ascii	"- edit -\0"
 txt_a_confirm:
@@ -219,8 +232,16 @@ txt_goto_predef:
 	.ascii	"Go to (predef)\0"
 txt_jmp_addr:
 	.ascii	"Jump to address\0"
+txt_dump:
+	.ascii	"Transfer\0"
 txt_dtack:
 	.ascii	"DTACK safety\0"
+txt_ready_send:
+	.ascii	"Ready to send\0"
+txt_ready_recv:
+	.ascii	"Ready to recv\0"
+txt_working:
+	.ascii	"Working..    \0"
 txt_dtack_err:
 	.ascii	"DTACK err?\0"
 txt_exc:
@@ -246,24 +267,31 @@ main:
 	/* mask irqs during init */
 	move.w		#0x2700,sr
 
-.if RELOCATE_TO_RAM
-	lea		(0,pc),a0
-	move.l		a0,d0
-	swap		d0
-	lsr.b		#4,d0
-	and.b		#0x0f,d0
-	cmp.b		#0,d0
+.if 0
+	/* copy to expansion device if magic number is set */
+	move.l		#0x400000,a1
+	cmp.w		#0x1234,(a1)
 	bne		0f
 
-	/* copy, assume 8K size */
-	move.w		#0x2000/8-1,d0
 	move.l		#0,a0
-	move.l		#0xFF0100,a1
+	move.w		#0x2000/8-1,d0
 1:
 	move.l		(a0)+,(a1)+
 	move.l		(a0)+,(a1)+
 	dbra		d0,1b
 0:
+.endif
+
+.if RELOCATE_TO_RAM
+	/* copy, assume 8K size */
+	move.l		#0,a0
+	move.l		#0xFF0100,a1
+	move.w		#0x2000/8-1,d0
+1:
+	move.l		(a0)+,(a1)+
+	move.l		(a0)+,(a1)+
+	dbra		d0,1b
+
 	lea		(0f,pc),a0
 	add.l		#0xFF0100,a0
 	jmp		(a0)
@@ -280,6 +308,13 @@ main:
 
 	/* Initialize VDP */
 	jsr 		init_gfx
+
+	/* Clear h/v scroll */
+	movea.l		#GFXDATA,a0
+	VRAM_ADDR	0x8000,(GFXCNTL)
+	move.l		#0,(a0)
+	VSRAM_ADDR	0,(GFXCNTL)
+	move.l		#0,(a0)
 
 	/* Load color data */
 	movea.l		#0,a0
@@ -392,7 +427,7 @@ jumptab:
 	bra		mode_start_menu
 	bra		mode_goto_predef
 	bra		mode_jmp_addr
-	bra		mode_main
+	bra		mode_transfer
 
 ##################### main #######################
 
@@ -1030,11 +1065,12 @@ mode_start_menu:
 	menu_text	txt_goto,        13, 11, 0
 	menu_text	txt_goto_predef, 13, 12, 0
 	menu_text	txt_jmp_addr,    13, 13, 0
-	menu_text	txt_dtack,       13, 14, 0
-	menu_text	txt_a_confirm,   13, 16, 2
+	menu_text	txt_dump,        13, 14, 0
+	menu_text	txt_dtack,       13, 15, 0
+	menu_text	txt_a_confirm,   13, 17, 2
 
 	/* dtack safety on/off */
-	movea.l		#0xe000+26*2+14*64*2,a0
+	movea.l		#0xe000+26*2+15*64*2,a0
 	jsr		load_prepare
 	move.w		#0x8000|'O',(a0)
 	btst.l		#4,d6
@@ -1050,7 +1086,7 @@ mode_start_menu:
 	movea.l		#0xe000+11*2+11*64*2,a0
 	moveq.l		#0,d0
 	move.b		d5,d0
-	and.b		#3,d0
+	and.b		#7,d0
 	lsl.w		#7,d0
 	add.w		d0,a0
 	jsr		load_prepare
@@ -1063,20 +1099,20 @@ mode_start_menu:
 	and.w		#3,d1
 	beq		msm_no_ud
 	move.b		d5,d1
-	and.b		#3,d1
+	and.b		#7,d1
 	btst.l		#0,d0
 	sne		d2
 	or.b		#1,d2		/* up -1, down 1 */
 	add.b		d2,d1
 	cmp.b		#0,d1
 	bge		0f
-	move.b		#3,d1
+	move.b		#4,d1
 0:
-	cmp.b		#3,d1
+	cmp.b		#4,d1
 	ble		0f
 	move.b		#0,d1
 0:
-	and.b		#0xfc,d5
+	and.b		#0xf8,d5
 	or.b		d1,d5
 	bra		vbl_end
 
@@ -1084,7 +1120,7 @@ msm_no_ud:
 	btst.l		#4,d0		/* A - confirm */
 	beq		msm_no_a
 	move.b		d5,d1
-	and.b		#3,d1
+	and.b		#7,d1
 	bne		0f
 	change_mode	MMODE_GOTO, MMODE_MAIN
 	bsr		start_menu_box
@@ -1105,6 +1141,12 @@ msm_no_ud:
 0:
 	cmp.b		#3,d1
 	bne		0f
+	change_mode	MMODE_DUMP, MMODE_MAIN
+	bsr		start_menu_box
+	bra		vbl_end
+0:
+	cmp.b		#4,d1
+	bne		0f
 	bchg.l		#4,d6
 	bra		vbl_end
 0:
@@ -1120,7 +1162,7 @@ msm_no_bc:
 
 start_menu_box:
 	movea.l		#0xe000+10*2+8*64*2,a1
-	move.w		#10-1,d1
+	move.w		#11-1,d1
 0:
 	move.w		a1,a0
 	jsr		load_prepare
@@ -1230,6 +1272,99 @@ mode_jmp_finish:
 	move.l		d5,a0
 	jmp		(a0)
 
+################### transfer #####################
+
+mode_transfer:
+	move.b		#0x40,(0xa1000b).l
+	move.b		#0x40,(0xa10005).l
+
+	move.l		(transfer_mode,pc),d0
+	tst.l		d0
+	bne		0f
+	lea		(txt_ready_send,pc),a0
+	bra		1f
+0:
+	lea		(txt_ready_recv,pc),a0
+1:
+	move.l		#13,d0
+	move.l		#13,d1
+	move.l		#0x8000,d2
+	jsr		print
+
+wait_tl_low0:
+	move.b		(0xa10005),d0
+	btst.b		#4,d0
+	bne		wait_tl_low0
+
+	menu_text	txt_working, 13, 13, 0
+
+	lea		0xa10005,a1
+	move.l		(transfer_addr,pc),a0
+	move.l		(transfer_len,pc),d2
+
+	move.l		(transfer_mode,pc),d0
+	tst.l		d0
+	bne		transfer_recv
+
+transfer_send:
+	move.b		#0x4f,(0xa1000b).l
+
+tr_send_loop:
+	move.b		(a0),d1
+	and.b		#0x0f,d1
+
+wait_tl_low1:
+	move.b		(a1),d0
+	btst.b		#4,d0
+	bne		wait_tl_low1
+
+	move.b		d1,(a1)		/* clears TH and writes data */
+
+	move.b		(a0)+,d1
+	lsr.b		#4,d1
+	bset.b		#6,d1		/* prepare TH */
+
+wait_tl_hi1:
+	move.b		(a1),d0
+	btst.b		#4,d0
+	beq		wait_tl_hi1
+
+	move.b		d1,(a1)
+	subq.l		#1,d2
+	bne		tr_send_loop
+
+	move.b		#0,(0xa1000b).l
+	bra		return_to_main
+
+transfer_recv:
+	move.b		#0,(a1)		/* clear TH */
+
+tr_recv_loop:
+wait_tl_low2:
+	move.b		(a1),d0
+	btst.b		#4,d0
+	bne		wait_tl_low2
+
+	move.b		#0x40,(a1)	/* set TH */
+	move.b		d0,d1
+	and.b		#0x0f,d1
+
+wait_tl_hi2:
+	move.b		(a1),d0
+	btst.b		#4,d0
+	beq		wait_tl_hi2
+
+	move.b		#0,(a1)		/* clear TH */
+	lsl.b		#4,d0
+	or.b		d0,d1
+	move.b		d1,(a0)+
+
+	subq.l		#1,d2
+	bne		tr_recv_loop
+
+	move.b		#0,(0xa1000b).l
+	bra		return_to_main
+
 
 # go back to main mode
 return_to_main:
@@ -1255,14 +1390,15 @@ init_gfx:
 	write_vdp_reg 	5,(0xfc00 >>  9)	/* Sprite address */
 	write_vdp_reg 	6,0	
 	write_vdp_reg	7,0			/* Backdrop color */
-	write_vdp_reg	10,1			/* Lines per hblank interrupt */
-	write_vdp_reg	11,0			/* 2-cell vertical scrolling */
-	write_vdp_reg	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320)
-	write_vdp_reg	13,(0x8000 >> 10)	/* Horizontal scroll address */
-	write_vdp_reg	15,2
-	write_vdp_reg	16,(VDP16_MAP_V32 | VDP16_MAP_H64)	/* layer size */
-	write_vdp_reg	17,0
-	write_vdp_reg	18,0xff
+	write_vdp_reg	0x0a,1			/* Lines per hblank interrupt */
+	write_vdp_reg	0x0b,0			/* 2-cell vertical scrolling */
+	write_vdp_reg	0x0c,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320)
+	write_vdp_reg	0x0d,(0x8000 >> 10)	/* Horizontal scroll address */
+	write_vdp_reg	0x0e,0
+	write_vdp_reg	0x0f,2
+	write_vdp_reg	0x10,(VDP16_MAP_V32 | VDP16_MAP_H64)	/* layer size */
+	write_vdp_reg	0x11,0
+	write_vdp_reg	0x12,0
 	rts
 
 
