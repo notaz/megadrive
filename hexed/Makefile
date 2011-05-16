@@ -19,6 +19,9 @@ a.out : $(OBJS)
 clean:
 	$(RM) $(TARGET) $(OBJS) $(TARGET).map a.out
 
+pc_transfer: pc_transfer.c
+	gcc -Wall -O2 -ggdb -o $@ $^
+
 
 # ----------- release -----------
 ifneq ($(findstring rel,$(MAKECMDGOALS)),)
