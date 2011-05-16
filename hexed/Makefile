@@ -1,12 +1,14 @@
 CROSS = m68k-elf-
+CC = $(CROSS)gcc
 AS = $(CROSS)as
 LD = $(CROSS)ld
 OBJCOPY = $(CROSS)objcopy
 
 ASFLAGS += -m68000 --register-prefix-optional --bitwise-or -pic
+CPPFLAGS += -Wa,-m68000 -Wa,--register-prefix-optional -Wa,--bitwise-or -Wa,-pic
 
 TARGET = hexed.bin
-OBJS = sega_gcc.o hexed.o font.o
+OBJS = sega_gcc.o hexed.o transfer.o font.o
 
 all : $(TARGET)
 
@@ -22,6 +24,9 @@ clean:
 pc_transfer: pc_transfer.c
 	gcc -Wall -O2 -ggdb -o $@ $^
 
+
+.S.o:
+	$(CC) -c -o $@ $^ $(CPPFLAGS)
 
 # ----------- release -----------
 ifneq ($(findstring rel,$(MAKECMDGOALS)),)

@@ -37,6 +37,7 @@
 .globl main
 .globl INT
 .globl VBL
+.globl return_to_main
 
 ##################################################
 #                                                #
@@ -81,7 +82,7 @@
 .equ MMODE_START_MENU,	4
 .equ MMODE_GOTO_PREDEF,	5
 .equ MMODE_JMP_ADDR,	6
-.equ MMODE_DUMP,	7
+.equ MMODE_PC,		7
 
 .equ predef_addr_cnt,	((predef_addrs_end-predef_addrs)/4)
 
@@ -214,13 +215,6 @@ safe_addrs:
 	dc.l 0xa13000, 0xa130ff
 safe_addrs_end:
 
-transfer_mode:
-	dc.l 0x000000		/* 1 for recv */
-transfer_addr:
-	dc.l 0x000000
-transfer_len:
-	dc.l 0x000800
-
 txt_edit:
 	.ascii	"- edit -\0"
 txt_a_confirm:
@@ -234,15 +228,13 @@ txt_goto_predef:
 txt_jmp_addr:
 	.ascii	"Jump to address\0"
 txt_dump:
-	.ascii	"Transfer\0"
+	.ascii	"PC Transfer\0"
 txt_dtack:
 	.ascii	"DTACK safety\0"
-txt_ready_send:
-	.ascii	"Ready to send\0"
-txt_ready_recv:
-	.ascii	"Ready to recv\0"
+txt_transfer_ready:
+	.ascii	"Transfer Ready\0"
 txt_working:
-	.ascii	"Working..    \0"
+	.ascii	"PC mode       \0"
 txt_dtack_err:
 	.ascii	"DTACK err?\0"
 txt_exc:
@@ -265,6 +257,8 @@ txt_exc:
 .align 2
 
 main:
+	/* make sure io port 2 is doing inputs */
+	move.b		#0,(0xa1000b).l
 	/* mask irqs during init */
 	move.w		#0x2700,sr
 
@@ -436,6 +430,12 @@ VBL:
 	addq.b		#1,d7
 #	movem.l		d0-d4/a0-a5,-(a7)
 
+	btst.b		#5,(0xa10005).l
+	bne		no_auto_transfer
+	change_mode	MMODE_PC, MMODE_MAIN
+	write_vdp_r_dst	12,(VDP12_SCREEN_V224 | VDP12_SCREEN_H320 | VDP12_STE),(GFXCNTL)
+
+no_auto_transfer:
 	moveq.l		#0,d0
 	move.w		d7,d0
 	lsr.w		#6,d0
@@ -1164,7 +1164,7 @@ msm_no_ud:
 0:
 	cmp.b		#3,d1
 	bne		0f
-	change_mode	MMODE_DUMP, MMODE_MAIN
+	change_mode	MMODE_PC, MMODE_MAIN
 	bsr		start_menu_box
 	bra		vbl_end
 0:
@@ -1295,20 +1295,11 @@ mode_jmp_finish:
 	move.l		d5,a0
 	jmp		(a0)
 
-################### transfer #####################
-
 mode_transfer:
-	move.b		#0x40,(0xa1000b).l
-	move.b		#0x40,(0xa10005).l
+	move.b		#0x40,(0xa1000b).l	/* port 2 ctrl */
+	move.b		#0x00,(0xa10005).l	/* port 2 data - start with TH low */
 
-	move.l		(transfer_mode,pc),d0
-	tst.l		d0
-	bne		0f
-	lea		(txt_ready_send,pc),a0
-	bra		1f
-0:
-	lea		(txt_ready_recv,pc),a0
-1:
+	lea		(txt_transfer_ready,pc),a0
 	move.l		#13,d0
 	move.l		#13,d1
 	move.l		#0x8000,d2
@@ -1320,74 +1311,7 @@ wait_tl_low0:
 	bne		wait_tl_low0
 
 	menu_text	txt_working, 13, 13, 0
-
-	lea		0xa10005,a1
-	move.l		(transfer_addr,pc),a0
-	move.l		(transfer_len,pc),d2
-
-	move.l		(transfer_mode,pc),d0
-	tst.l		d0
-	bne		transfer_recv
-
-transfer_send:
-	move.b		#0x4f,(0xa1000b).l
-
-tr_send_loop:
-	move.b		(a0),d1
-	and.b		#0x0f,d1
-
-wait_tl_low1:
-	move.b		(a1),d0
-	btst.b		#4,d0
-	bne		wait_tl_low1
-
-	move.b		d1,(a1)		/* clears TH and writes data */
-
-	move.b		(a0)+,d1
-	lsr.b		#4,d1
-	bset.b		#6,d1		/* prepare TH */
-
-wait_tl_hi1:
-	move.b		(a1),d0
-	btst.b		#4,d0
-	beq		wait_tl_hi1
-
-	move.b		d1,(a1)
-	subq.l		#1,d2
-	bne		tr_send_loop
-
-	move.b		#0,(0xa1000b).l
-	bra		return_to_main
-
-transfer_recv:
-	move.b		#0,(a1)		/* clear TH */
-
-tr_recv_loop:
-wait_tl_low2:
-	move.b		(a1),d0
-	btst.b		#4,d0
-	bne		wait_tl_low2
-
-	move.b		#0x40,(a1)	/* set TH */
-	move.b		d0,d1
-	and.b		#0x0f,d1
-
-wait_tl_hi2:
-	move.b		(a1),d0
-	btst.b		#4,d0
-	beq		wait_tl_hi2
-
-	move.b		#0,(a1)		/* clear TH */
-	lsl.b		#4,d0
-	or.b		d0,d1
-	move.b		d1,(a0)+
-
-	subq.l		#1,d2
-	bne		tr_recv_loop
-
-	move.b		#0,(0xa1000b).l
-	bra		return_to_main
-
+	bra		do_transfer
 
 # go back to main mode
 return_to_main:
