@@ -20,8 +20,6 @@
         .ascii "                         "
         .ascii "JUE             "
 
-	tst.l   0xa10008
-	bne     SkipSetup
 * Check Version Number
 	move.b  (0xa10000),%d0
 	andi.b  #0x0f,%d0
@@ -32,7 +30,7 @@ WrongVersion:
 	moveq   #0,%d0
 	movea.l %d0,%a7
 	move    %a7,%usp
-SkipSetup:
+
 	tst.w   0xC00004
 	bra     main
 

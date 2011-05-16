@@ -1653,16 +1653,7 @@ wait_vsync_poll:
 
 
 test_code:
-	move.w		#3, (0xa15100)  /* adapter enable, reset off */
 	nop
-	nop
-	move.w		#1, (0xa15180)  /* mode 1 */
-	movea.l		#0xa15200, a0
-	move.l		#256-1, d0
-0:
-	move.w		#0,(a0)+
-	dbra		d0,0b
-	move.w		#0x83e0, (0xa15200) /* color 0 */
 
 test_code_ret_op:
 	jmp	0x123456        /* will be patched */
