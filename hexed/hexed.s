@@ -29,8 +29,9 @@
 #   --register-prefix-optional --bitwise-or
 #
 
-.equ USE_VINT,        1
-.equ RELOCATE_TO_RAM, 0
+.equ USE_VINT,        0
+.equ COPY_TO_EXP,     1
+.equ RELOCATE_TO_RAM, 1
 
 .text
 .globl main
@@ -267,7 +268,7 @@ main:
 	/* mask irqs during init */
 	move.w		#0x2700,sr
 
-.if 0
+.if COPY_TO_EXP
 	/* copy to expansion device if magic number is set */
 	move.l		#0x400000,a1
 	cmp.w		#0x1234,(a1)
@@ -283,8 +284,13 @@ main:
 .endif
 
 .if RELOCATE_TO_RAM
+	/* we could be relocated by 32x or something else, adjust start addr */
+	lea		(pc),a0
+	move.l		a0,d0
+	and.l		#0xff0000,d0
+	move.l		d0,a0
+
 	/* copy, assume 8K size */
-	move.l		#0,a0
 	move.l		#0xFF0100,a1
 	move.w		#0x2000/8-1,d0
 1:
@@ -292,8 +298,25 @@ main:
 	move.l		(a0)+,(a1)+
 	dbra		d0,1b
 
+	/* copy test code */
+	lea             (test_code,pc),a0
+	move.l		#0xffc000,a1
+	move.w		#(test_code_end - test_code)/2-1,d0
+1:
+	move.w		(a0)+,(a1)+
+	dbra		d0,1b
+
 	lea		(0f,pc),a0
-	add.l		#0xFF0100,a0
+	move.l		a0,d0
+	and.l		#0x00ffff,d0
+	add.l		#0xFF0100,d0
+	move.l		d0,a0
+
+	/* patch test code */
+	move.l		#0xffc000,a1
+	add.w		#(test_code_ret_op-test_code+2),a1
+	move.l		a0,(a1)
+
 	jmp		(a0)
 0:
 .endif
@@ -1628,6 +1651,22 @@ wait_vsync_poll:
 	beq		0b
 	rts
 
+
+test_code:
+	move.w		#3, (0xa15100)  /* adapter enable, reset off */
+	nop
+	nop
+	move.w		#1, (0xa15180)  /* mode 1 */
+	movea.l		#0xa15200, a0
+	move.l		#256-1, d0
+0:
+	move.w		#0,(a0)+
+	dbra		d0,0b
+	move.w		#0x83e0, (0xa15200) /* color 0 */
+
+test_code_ret_op:
+	jmp	0x123456        /* will be patched */
+test_code_end:
 
 #################################################
 #                                               #
