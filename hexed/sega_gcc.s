@@ -8,8 +8,8 @@
         dc.l INT,INT,INT,INT,INT,INT,INT,INT
         dc.l INT,INT,INT,INT,INT,INT,INT
         .ascii "SEGA GENESIS                    "
-        .ascii "hexed (c) notaz, 2009                           "
-        .ascii "HEXED (C) NOTAZ, 2009                           "
+        .ascii "hexed (c) notaz, 2009-2011                      "
+        .ascii "HEXED (C) NOTAZ, 2009-2011                      "
         .ascii "GM 00000000-00"
         .byte 0x00,0x00
         .ascii "JD              "

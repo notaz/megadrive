@@ -215,6 +215,9 @@ safe_addrs:
 	dc.l 0xa13000, 0xa130ff
 safe_addrs_end:
 
+sizeof_bin:
+	dc.l _edata
+
 txt_edit:
 	.ascii	"- edit -\0"
 txt_a_confirm:
@@ -269,7 +272,8 @@ main:
 	bne		0f
 
 	move.l		#0,a0
-	move.w		#0x2000/8-1,d0
+	move.l		(sizeof_bin,pc),d0
+	lsr.l		#3,d0
 1:
 	move.l		(a0)+,(a1)+
 	move.l		(a0)+,(a1)+
@@ -286,7 +290,8 @@ main:
 
 	/* copy, assume 8K size */
 	move.l		#0xFF0100,a1
-	move.w		#0x2000/8-1,d0
+	move.l		(sizeof_bin,pc),d0
+	lsr.l		#3,d0
 1:
 	move.l		(a0)+,(a1)+
 	move.l		(a0)+,(a1)+
