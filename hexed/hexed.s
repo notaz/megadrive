@@ -443,6 +443,7 @@ no_auto_transfer:
 	lea		(jumptab,pc,d0),a0
 	jmp		(a0)
 jumptab:
+	/* branch insns here because we want to be position independent */
 	bra		mode_main
 	bra		mode_val_input
 	bra		mode_edit_val	/* edit val in editor */

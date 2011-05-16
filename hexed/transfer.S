@@ -88,6 +88,7 @@
 .endm
 
 recv_byte:
+	moveq.l		#0,d0
 	recv_one_byte 1
 	rts
 
@@ -118,14 +119,23 @@ do_transfer:
 	bne		return
 
 	bsr		recv_byte
-	cmp.b		#CMD_MD_SEND,d0		/* sent to us */
-	beq		transfer_recv
-	cmp.b		#CMD_MD_RECV,d0		/* recv from us */
-	beq		transfer_send
-	bra		return
+	cmp.b		#CMD_FIRST,d0
+	bcs		return
+	cmp.b		#CMD_LAST+1,d0
+	bcc		return
+	sub.b		#CMD_FIRST,d0
+
+	lsl.w		#2,d0
+	lea		(jumptab,pc,d0),a0
+	jmp		(a0)
+jumptab:
+	bra		pcc_transfer_recv	/* sent to us */
+	bra		pcc_transfer_send	/* recv from us */
+	bra		pcc_jump
+	bra		pcc_test_code
 
 
-transfer_recv:
+pcc_transfer_recv:
 	bsr		recv_ad
 	move.l		d0,a0
 	bsr		recv_ad
@@ -135,10 +145,11 @@ tr_recv_loop:
 	recv_one_byte
 	move.b		d0,(a0)+
 	subq.l		#1,d3
-	bne		tr_recv_loop
+	bgt		tr_recv_loop
 	bra		return
 
-transfer_send:
+
+pcc_transfer_send:
 	bsr		recv_ad
 	move.l		d0,a0
 	bsr		recv_ad
@@ -156,7 +167,17 @@ tr_send_loop:
 	move.b		(a0)+,d0
 	send_one_byte
 	subq.l		#1,d3
-	bne		tr_send_loop
+	bgt		tr_send_loop
+	bra		return
+
+
+pcc_jump:
+	bsr		recv_ad
+	move.l		d0,a0
+	jmp		(a0)
+
+
+pcc_test_code:
 	bra		return
 
 

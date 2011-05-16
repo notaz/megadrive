@@ -157,7 +157,8 @@ static void usage(const char *argv0)
 {
 	fprintf(stderr, "usage:\n%s <cmd> [args]\n"
 		"\tsend <file> <addr> [size]\n"
-		"\trecv <file> <addr> <size>\n", argv0);
+		"\trecv <file> <addr> <size>\n"
+		"\tjump <addr>\n", argv0);
 	exit(1);
 }
 
@@ -235,6 +236,13 @@ int main(int argc, char *argv[])
 
 		memset(data, 0, size);
 	}
+	else if (strcmp(argv[1], "jump") == 0)
+	{
+		if (argc != 3)
+			usage(argv[0]);
+
+		addr = atoi_or_die(argv[2]);
+	}
 	else
 		usage(argv[0]);
 
@@ -253,13 +261,12 @@ int main(int argc, char *argv[])
 	if (inb(PORT_STATUS) & 0x40)
 		printf("waiting for TH low..\n");
 	while (inb(PORT_STATUS) & 0x40)
-		sleep(1);
+		usleep(100000);
 
 	outb(0xe0, PORT_CONTROL);
 
 	if (strcmp(argv[1], "send") == 0)
 	{
-		printf("send %06x %06x\n", addr, size);
 		send_cmd(CMD_MD_SEND);
 		send_byte((addr >> 16) & 0xff);
 		send_byte((addr >>  8) & 0xff);
@@ -303,9 +310,19 @@ int main(int argc, char *argv[])
 
 		fwrite(data, 1, size, file);
 	}
-	printf("\b\b\b\b\b\b\b\b\b\b\b\b\b");
-	printf("%06x/%06x\n", i, size);
-	fclose(file);
+	else if (strcmp(argv[1], "jump") == 0)
+	{
+		send_cmd(CMD_JUMP);
+		send_byte((addr >> 16) & 0xff);
+		send_byte((addr >>  8) & 0xff);
+		send_byte((addr >>  0) & 0xff);
+	}
+
+	if (file != NULL) {
+		printf("\b\b\b\b\b\b\b\b\b\b\b\b\b");
+		printf("%06x/%06x\n", i, size);
+		fclose(file);
+	}
 
 	/* switch TL back to high, disable outputs */
 	outb(0xe0, PORT_CONTROL);
