@@ -108,6 +108,10 @@ recv_ad:
 	move.l		d2,d0
 	rts
 
+send_byte:
+	send_one_byte
+	rts
+
 
 do_transfer:
 	lea		0xa10005,a1
@@ -132,9 +136,11 @@ jumptab:
 	bra		pcc_transfer_recv	/* sent to us */
 	bra		pcc_transfer_send	/* recv from us */
 	bra		pcc_jump
+	bra		pcc_io
 	bra		pcc_test_code
 
 
+/* receive data from PC */
 pcc_transfer_recv:
 	bsr		recv_ad
 	move.l		d0,a0
@@ -149,13 +155,14 @@ tr_recv_loop:
 	bra		return
 
 
+/* send data to PC */
 pcc_transfer_send:
 	bsr		recv_ad
 	move.l		d0,a0
 	bsr		recv_ad
 	move.l		d0,d3
 
-0: /*Lwait_tl_low:*/
+0: /*Lwait_tl_low: it should switch to rx mode before lowering tl */
 	move.b		(a1),d0
 	btst.b		#4,d0
 	bne		0b /*Lwait_tl_low*/
@@ -171,14 +178,122 @@ tr_send_loop:
 	bra		return
 
 
+/* call specified location */
 pcc_jump:
 	bsr		recv_ad
 	move.l		d0,a0
-	jmp		(a0)
+	jsr		(a0)
+	bra		return
 
 
+/* do simple i/o commands */
+pcc_io:
+	moveq.l		#0,d4
+	bsr		recv_byte
+	move.b		d0,d4
+	bsr		recv_byte
+	lsl.l		#8,d4
+	move.b		d0,d4
+
+pcc_io_loop:
+	move.b		#0x40,(0xa1000b).l	/* input mode */
+
+	sub.w		#1,d4
+	bmi		return
+
+	bsr		recv_byte
+	move.b		d0,d3			/* cmd */
+
+	bsr		recv_ad
+	move.l		d0,a2			/* addr */
+
+	cmp.b		#IOSEQ_W32, d3
+	beq		pcc_io_w32
+	cmp.b		#IOSEQ_W16, d3
+	beq		pcc_io_w16
+	cmp.b		#IOSEQ_W8, d3
+	bne		pcc_io_rx
+
+pcc_io_w8:
+	bsr		recv_byte
+	move.b		d0,(a2)
+	bra		pcc_io_loop
+
+pcc_io_w16:
+	bsr		recv_byte
+	move.b		d0,d3
+	bsr		recv_byte
+	lsl.w		#8,d3
+	move.b		d0,d3
+	move.w		d3,(a2)
+	bra		pcc_io_loop
+
+pcc_io_w32:
+	bsr		recv_byte
+	move.b		d0,d3
+	bsr		recv_byte
+	lsl.w		#8,d3
+	move.b		d0,d3
+	bsr		recv_byte
+	lsl.l		#8,d3
+	move.b		d0,d3
+	bsr		recv_byte
+	lsl.l		#8,d3
+	move.b		d0,d3
+	move.l		d3,(a2)
+	bra		pcc_io_loop
+
+pcc_io_rx:
+0: /*Lwait_tl_low:*/
+	move.b		(a1),d0
+	btst.b		#4,d0
+	bne		0b /*Lwait_tl_low*/
+
+	move.b		#0x4f,(0xa1000b).l
+	move.b		#0x40,(a1)
+
+	cmp.b		#IOSEQ_R32, d3
+	beq		pcc_io_r32
+	cmp.b		#IOSEQ_R16, d3
+	beq		pcc_io_r16
+	cmp.b		#IOSEQ_R8, d3
+	bne		return
+
+pcc_io_r8:
+	move.b		(a2),d0
+	bsr		send_byte
+	bra		pcc_io_loop
+
+pcc_io_r16:
+	move.w		(a2),d3
+	move.w		d3,d0
+	lsr.w		#8,d0
+	bsr		send_byte
+	move.b		d3,d0
+	bsr		send_byte
+	bra		pcc_io_loop
+
+pcc_io_r32:
+	move.l		(a2),d3
+	move.l		d3,d0
+	swap		d0
+	lsr.l		#8,d0
+	bsr		send_byte
+	move.l		d3,d0
+	swap		d0
+	bsr		send_byte
+	move.w		d3,d0
+	lsr.w		#8,d0
+	bsr		send_byte
+	move.b		d3,d0
+	bsr		send_byte
+	bra		pcc_io_loop
+
+
+/* some random code */
 pcc_test_code:
 	bra		return
+
 
 
 return:

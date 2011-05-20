@@ -74,22 +74,28 @@
 #define timediff(now, start) \
 	((now.tv_sec - start.tv_sec) * 1000000 + now.tv_usec - start.tv_usec)
 
-static void do_exit(const char *msg)
+#define PBE2(p) ((*(p) << 8) | *(p+1))
+#define PBE3(p) ((*(p) << 16) | (*(p + 1) << 8) | *(p + 2))
+#define PBE4(p) ((*(p) << 24) | (*(p + 1) << 16) | (*(p + 2) << 8) | *(p + 3))
+
+static void do_exit(const char *msg, const char *where)
 {
 	/* switch TL back to high */
 	outb(0xe0, PORT_CONTROL);
 
+	if (where)
+		fprintf(stderr, "%s: ", where);
 	if (msg)
-		printf("%s", msg);
+		fprintf(stderr, "%s", msg);
 	exit(1);
 }
 
 static void inthandler(int u)
 {
-	do_exit("\n");
+	do_exit("\n", NULL);
 }
 
-static void wait_th_low(void)
+static void wait_th_low(const char *where)
 {
 	struct timeval start, now;
 
@@ -98,11 +104,11 @@ static void wait_th_low(void)
 	while (inb(PORT_STATUS) & 0x40) {
 		gettimeofday(&now, NULL);
 		if (timediff(now, start) > ACK_TIMEOUT)
-			do_exit("timeout waiting TH low\n");
+			do_exit("timeout waiting TH low\n", where);
 	}
 }
 
-static void wait_th_high(void)
+static void wait_th_high(const char *where)
 {
 	struct timeval start, now;
 
@@ -111,8 +117,22 @@ static void wait_th_high(void)
 	while (!(inb(PORT_STATUS) & 0x40)) {
 		gettimeofday(&now, NULL);
 		if (timediff(now, start) > ACK_TIMEOUT)
-			do_exit("timeout waiting TH high\n");
+			do_exit("timeout waiting TH high\n", where);
 	}
+}
+
+static void output_to_input(void)
+{
+	/* TL high, recv mode; also give time
+	 * MD to see TL before we lower it in recv_byte */
+	outb(0xe0, PORT_CONTROL);
+	usleep(4*10);			/* must be at least 12+8+8 M68k cycles, 28/7.67M */
+}
+
+static void input_to_output(void)
+{
+	wait_th_low("input_to_output");
+	outb(0xc0, PORT_CONTROL);	/* TL high, out mode */
 }
 
 static unsigned int recv_byte(void)
@@ -121,30 +141,42 @@ static unsigned int recv_byte(void)
 
 	outb(0xe2, PORT_CONTROL);	/* TL low */
 
-	wait_th_low();
+	wait_th_low("recv_byte");
 
 	byte = inb(PORT_DATA) & 0x0f;
 
 	outb(0xe0, PORT_CONTROL);	/* TL high */
 
-	wait_th_high();
+	wait_th_high("recv_byte");
 
 	byte |= inb(PORT_DATA) << 4;
 
 	return byte;
 }
 
+static void recv_bytes(unsigned char *b, size_t count)
+{
+	while (count-- > 0)
+		*b++ = recv_byte();
+}
+
 static void send_byte(unsigned int byte)
 {
-	wait_th_low();
+	wait_th_low("recv_bytes");
 
 	outb(byte & 0x0f, PORT_DATA);
 	outb(0xc2, PORT_CONTROL);	/* TL low */
 
-	wait_th_high();
+	wait_th_high("recv_bytes");
 
 	outb((byte >> 4) & 0x0f, PORT_DATA);
 	outb(0xc0, PORT_CONTROL);	/* TL high */
+}
+
+static void send_bytes(unsigned char *b, size_t count)
+{
+	while (count-- > 0)
+		send_byte(*b++);
 }
 
 static void send_cmd(unsigned int cmd)
@@ -178,7 +210,8 @@ static unsigned int atoi_or_die(const char *a)
 
 int main(int argc, char *argv[])
 {
-	unsigned int addr = 0, size = 0, i = 0;
+	unsigned int addr = 0, size = 0;
+	unsigned int count = 0, i = 0;
 	int ret;
 	unsigned char *data;
 	FILE *file = NULL;
@@ -243,6 +276,52 @@ int main(int argc, char *argv[])
 
 		addr = atoi_or_die(argv[2]);
 	}
+	else if (strcmp(argv[1], "io") == 0)
+	{
+		unsigned int cmd = 0, value, iosize;
+		unsigned char *p = data;
+
+		for (i = 2; i < argc; ) {
+			if (argv[i][0] == 'r')
+				cmd = IOSEQ_R8;
+			else if (argv[i][0] == 'w')
+				cmd = IOSEQ_W8;
+			else
+				usage(argv[0]);
+
+			iosize = atoi_or_die(&argv[i][1]);
+			if (iosize == 32)
+				cmd += 2;
+			else if (iosize == 16)
+				cmd += 1;
+			else if (iosize != 8)
+				usage(argv[0]);
+			*p++ = cmd;
+			i++;
+
+			addr = atoi_or_die(argv[i]);
+			*p++ = addr >> 16;
+			*p++ = addr >> 8;
+			*p++ = addr >> 0;
+			i++;
+
+			if (cmd == IOSEQ_W8 || cmd == IOSEQ_W16 || cmd == IOSEQ_W32) {
+				value = atoi_or_die(argv[i]);
+				switch (iosize) {
+				case 32:
+					*p++ = value >> 24;
+					*p++ = value >> 16;
+				case 16:
+					*p++ = value >> 8;
+				case 8:
+					*p++ = value >> 0;
+				}
+				i++;
+			}
+
+			count++;
+		}
+	}
 	else
 		usage(argv[0]);
 
@@ -295,7 +374,7 @@ int main(int argc, char *argv[])
 		send_byte((size >> 16) & 0xff);
 		send_byte((size >>  8) & 0xff);
 		send_byte((size >>  0) & 0xff);
-		outb(0xe0, PORT_CONTROL);	/* TL high, recv mode */
+		output_to_input();
 
 		for (i = 0; i < size; i++)
 		{
@@ -316,6 +395,58 @@ int main(int argc, char *argv[])
 		send_byte((addr >> 16) & 0xff);
 		send_byte((addr >>  8) & 0xff);
 		send_byte((addr >>  0) & 0xff);
+	}
+	else if (strcmp(argv[1], "io") == 0)
+	{
+		unsigned char *p = data;
+		unsigned char rdata[4];
+		send_cmd(CMD_IOSEQ);
+		send_byte((count >> 8) & 0xff);
+		send_byte((count >> 0) & 0xff);
+
+		for (; count > 0; count--) {
+			input_to_output();
+			send_bytes(p, 4);	/* cmd + addr */
+
+			switch (p[0]) {
+			case IOSEQ_R8:
+				output_to_input();
+				recv_bytes(rdata, 1);
+				printf("r8  %06x       %02x\n", PBE3(p + 1), rdata[0]);
+				p += 4;
+				break;
+			case IOSEQ_R16:
+				output_to_input();
+				recv_bytes(rdata, 2);
+				printf("r16 %06x     %04x\n", PBE3(p + 1), PBE2(rdata));
+				p += 4;
+				break;
+			case IOSEQ_R32:
+				output_to_input();
+				recv_bytes(rdata, 4);
+				printf("r32 %06x %08x\n", PBE3(p + 1), PBE4(rdata));
+				p += 4;
+				break;
+			case IOSEQ_W8:
+				send_bytes(&p[4], 1);
+				printf("w8  %06x       %02x\n", PBE3(p + 1), p[4]);
+				p += 5;
+				break;
+			case IOSEQ_W16:
+				send_bytes(&p[4], 2);
+				printf("w16 %06x     %04x\n", PBE3(p + 1), PBE2(p + 4));
+				p += 6;
+				break;
+			case IOSEQ_W32:
+				send_bytes(&p[4], 4);
+				printf("w32 %06x %08x\n", PBE3(p + 1), PBE4(p + 4));
+				p += 8;
+				break;
+			default:
+				do_exit("error in ioseq data\n", NULL);
+				break;
+			}
+		}
 	}
 
 	if (file != NULL) {
