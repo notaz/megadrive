@@ -20,18 +20,9 @@
         .ascii "                         "
         .ascii "JUE             "
 
-* Check Version Number
-	move.b  (0xa10000),%d0
-	andi.b  #0x0f,%d0
-	beq     WrongVersion
-* Sega Security Code (SEGA)
-	move.l  #0x53454741,(0xa14000)
-WrongVersion:
 	moveq   #0,%d0
 	movea.l %d0,%a7
 	move    %a7,%usp
-
-	tst.w   0xC00004
 	bra     main
 
 * INT:

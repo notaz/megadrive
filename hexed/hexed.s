@@ -262,8 +262,18 @@ txt_exc:
 main:
 	/* make sure io port 2 is doing inputs */
 	move.b		#0,(0xa1000b).l
-	/* mask irqs during init */
+	/* make sure irqs are masked */
 	move.w		#0x2700,sr
+	/* take care of TMSS */
+	move.b		(0xa10000).l,d0
+	andi.b		#0x0f,d0
+	beq		no_tmss
+	move.l		#0x53454741,(0xa14000).l
+	/* want cart, not OS rom if cart pops in */
+	move.w		#1,(0xa14100).l
+	/* touch VDP after TMSS setup? */
+	tst.w		(0xc00004).l
+no_tmss:
 
 .if COPY_TO_EXP
 	/* copy to expansion device if magic number is set */
