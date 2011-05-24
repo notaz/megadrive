@@ -92,6 +92,18 @@ recv_byte:
 	recv_one_byte 1
 	rts
 
+# receive 1 16bit word to d0
+#  in: a1 - data port
+#  trash: d1,d2
+recv_word:
+	recv_one_byte
+	move.b		d0,d2
+	recv_one_byte
+	lsl.w		#8,d2
+	move.b		d0,d2
+	move.w		d2,d0
+	rts
+
 # receive address/size to d0 (3 bytes BE)
 #  in: a1 - data port
 #  trash: d1,d2
@@ -111,6 +123,41 @@ recv_ad:
 send_byte:
 	send_one_byte
 	rts
+
+.equ sat_maxsize, (80*8+0x200) /* sprites+max_align */
+
+# make sure cache is invalidated
+# note: VRAM copy doesn't seem to help here
+# note2: cache is updated as data is written
+#  in: d0 - vdp reg5, a0 = 0xc00000
+#  trash: d1,d2,a2
+invalidate_sprite_cache:
+	move.w		#0x8f02,4(a0)		/* auto increment 2 */
+	lsl.b		#1,d0			/* upper byte of sat address */
+	move.b		d0,d1
+	lsr.b		#6,d1			/* 15:14 dst addr */
+	and.b		#0x3f,d0		/* assemble cmd */
+	lsl.w		#8,d0
+	swap		d0
+	move.b		d1,d0
+	move.l		d0,4(a0)
+
+	move.l		#0xffe000,a2
+	move.l		#sat_maxsize/2-1,d2
+0:
+	move.w		(a0),(a2)+
+	dbra		d2,0b
+
+	bset		#30,d0			/* VRAM write */
+	move.l		d0,4(a0)
+
+	move.l		#0xffe000,a2
+	move.l		#sat_maxsize/2-1,d2
+0:
+	move.w		(a2)+,(a0)
+	dbra		d2,0b
+	rts
+
 
 
 do_transfer:
@@ -137,6 +184,7 @@ jumptab:
 	bra		pcc_transfer_send	/* recv from us */
 	bra		pcc_jump
 	bra		pcc_io
+	bra		pcc_loadstate
 	bra		pcc_test_code
 
 
@@ -288,6 +336,72 @@ pcc_io_r32:
 	move.b		d3,d0
 	bsr		send_byte
 	bra		pcc_io_loop
+
+
+/* PicoDrive savestate load */
+pcc_loadstate:
+	/* write VRAM */
+	move.l		#0xc00000,a0
+	move.w		#0x8f02,4(a0)		/* auto increment 2 */
+
+	move.l		#0x40000000,4(a0)
+	move.l		#0x10000/2-1,d3
+tr_do_vram_loop:
+	bsr		recv_word
+	move.w		d0,(a0)
+	dbra		d3, tr_do_vram_loop
+
+	/* write cram */
+	move.l		#0xc0000000,4(a0)
+	move.l		#0x80/2-1,d3
+tr_do_cram_loop:
+	bsr		recv_word
+	move.w		d0,(a0)
+	dbra		d3, tr_do_cram_loop
+
+	/* write vsram */
+	move.l		#0x40000010,4(a0)
+	move.l		#0x80/2-1,d3
+tr_do_vsram_loop:
+	bsr		recv_word
+	move.w		d0,(a0)
+	dbra		d3, tr_do_vsram_loop
+
+	/* recv and write regs */
+	lea		0xffe000,a3
+	move.l		a3,a2
+	moveq.l		#0x20-1,d3
+tr_do_vdpreg_recv_loop:
+	bsr		recv_byte
+	move.b		d0,(a2)+
+	dbra		d3, tr_do_vdpreg_recv_loop
+
+	move.l		a3,a2
+	moveq.l		#0,d3
+tr_do_vdpreg_loop:
+	move.b		d3,d1
+	or.b		#0x80,d1
+	lsl.w		#8,d1
+	move.b		(d3,a2),d1
+	move.w		d1,4(a0)
+	addq.l		#1,d3
+	cmp.b		#0x17,d3	/* FIXME: r23 might cause DMA or.. */
+	bne		0f		/* ..something and hang VDP.. */
+	add.b		#1,d3		/* ..so we skip it */
+0:
+	cmp.b		#0x20,d3
+	blt		tr_do_vdpreg_loop
+
+	moveq.l		#0,d0
+	move.b		5(a3),d0
+	bsr		invalidate_sprite_cache
+
+
+0:	bra		0b
+
+	bra		return
+
+
 
 
 /* some random code */

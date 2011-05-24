@@ -23,7 +23,7 @@ clean:
 
 
 pc_transfer: pc_transfer.c
-	gcc -Wall -O2 -ggdb -o $@ $^
+	gcc -Wall -O2 -ggdb -o $@ $^ -lz
 
 %.o: %.S
 	$(CC) -c -o $@ $^ $(CPPFLAGS)

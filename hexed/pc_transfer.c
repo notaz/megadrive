@@ -31,6 +31,7 @@
 #include <sys/io.h>
 #include <signal.h>
 #include <sys/time.h>
+#include <zlib.h>
 
 #include "transfer.h"
 
@@ -190,7 +191,9 @@ static void usage(const char *argv0)
 	fprintf(stderr, "usage:\n%s <cmd> [args]\n"
 		"\tsend <file> <addr> [size]\n"
 		"\trecv <file> <addr> <size>\n"
-		"\tjump <addr>\n", argv0);
+		"\tjump <addr>\n"
+		"\tio {r{8,16,32} <addr>,w{8,16,32} <addr> <data>}*\n"
+		"\tloadstate <picodrive_savestate>\n", argv0);
 	exit(1);
 }
 
@@ -206,6 +209,16 @@ static unsigned int atoi_or_die(const char *a)
 	}
 
 	return i;
+}
+
+static void checked_gzread(gzFile f, void *data, size_t size)
+{
+	unsigned int ret;
+	ret = gzread(f, data, size);
+	if (ret != size) {
+		fprintf(stderr, "gzread returned %d/%zu\n", ret, size);
+		exit(1);
+	}
 }
 
 int main(int argc, char *argv[])
@@ -320,6 +333,75 @@ int main(int argc, char *argv[])
 			}
 
 			count++;
+		}
+	}
+	else if (strcmp(argv[1], "loadstate") == 0)
+	{
+		unsigned char chunk;
+		char header[12];
+		gzFile f;
+		int len;
+
+		if (argc != 3)
+			usage(argv[0]);
+
+		f = gzopen(argv[2], "rb");
+		if (f == NULL) {
+			perror("gzopen");
+			return 1;
+		}
+
+		checked_gzread(f, header, sizeof(header));
+		if (strncmp(header, "PicoSEXT", 8) != 0) {
+			fprintf(stderr, "bad header\n");
+			return 1;
+		}
+
+		while (!gzeof(file))
+		{
+			ret = gzread(f, &chunk, 1);
+			if (ret == 0)
+				break;
+			checked_gzread(f, &len, 4);
+			//printf("%2d %x\n", chunk, len);
+			switch (chunk) {
+			case 3: // VRAM
+				checked_gzread(f, data, len);
+				size += len;
+				break;
+			case 5: // CRAM
+				checked_gzread(f, data + 0x10000, len);
+				size += len;
+				break;
+			case 6: // VSRAM
+				checked_gzread(f, data + 0x10080, len);
+				size += len;
+				break;
+			case 8: // video
+				checked_gzread(f, data + 0x10100, len);
+				data[size+0] &= ~1;   // no display disable
+				data[size+1] |= 0x40; // no blanking
+				size += 0x20;
+				break;
+			default:
+				if (chunk > 64+8) {
+					fprintf(stderr, "bad chunk: %d\n", chunk);
+					return 1;
+				}
+				gzseek(f, len, SEEK_CUR);
+				break;
+			}
+		}
+		gzclose(f);
+		if (size != 0x10120) {
+			fprintf(stderr, "bad final size: %x\n", size);
+			return 1;
+		}
+		// unbyteswap *RAMs (stored byteswapped)
+		for (i = 0; i < 0x10100; i += 2) {
+			int tmp = data[i];
+			data[i] = data[i + 1];
+			data[i + 1] = tmp;
 		}
 	}
 	else
@@ -448,12 +530,28 @@ int main(int argc, char *argv[])
 			}
 		}
 	}
+	else if (strcmp(argv[1], "loadstate") == 0)
+	{
+		send_cmd(CMD_LOADSTATE);
 
-	if (file != NULL) {
+		for (i = 0; i < size; i++)
+		{
+			if ((i & 0x1f) == 0) {
+				printf("\b\b\b\b\b\b\b\b\b\b\b\b\b");
+				printf("%06x/%06x", i, size);
+				fflush(stdout);
+			}
+
+			send_byte(data[i]);
+		}
+	}
+
+	if (size != 0) {
 		printf("\b\b\b\b\b\b\b\b\b\b\b\b\b");
 		printf("%06x/%06x\n", i, size);
-		fclose(file);
 	}
+	if (file != NULL)
+		fclose(file);
 
 	/* switch TL back to high, disable outputs */
 	outb(0xe0, PORT_CONTROL);
