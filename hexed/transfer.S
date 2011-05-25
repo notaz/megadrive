@@ -120,9 +120,22 @@ recv_ad:
 	move.l		d2,d0
 	rts
 
+# send 1 byte in d0
+#  in: a1 - data port
+#  trash: d1,d2
 send_byte:
 	send_one_byte
 	rts
+
+.macro switch_to_output
+0: /*Lwait_tl_low: PC should switch to rx mode before lowering tl */
+	move.b		(a1),d0
+	btst.b		#4,d0
+	bne		0b /*Lwait_tl_low*/
+
+	move.b		#0x4f,(0xa1000b).l
+	move.b		#0x40,(a1)
+.endm
 
 .equ sat_maxsize, (80*8+0x200) /* sprites+max_align */
 
@@ -185,6 +198,7 @@ jumptab:
 	bra		pcc_jump
 	bra		pcc_io
 	bra		pcc_loadstate
+	bra		pcc_vram_send
 	bra		pcc_test_code
 
 
@@ -210,13 +224,7 @@ pcc_transfer_send:
 	bsr		recv_ad
 	move.l		d0,d3
 
-0: /*Lwait_tl_low: it should switch to rx mode before lowering tl */
-	move.b		(a1),d0
-	btst.b		#4,d0
-	bne		0b /*Lwait_tl_low*/
-
-	move.b		#0x4f,(0xa1000b).l
-	move.b		#0x40,(a1)
+	switch_to_output
 
 tr_send_loop:
 	move.b		(a0)+,d0
@@ -292,13 +300,7 @@ pcc_io_w32:
 	bra		pcc_io_loop
 
 pcc_io_rx:
-0: /*Lwait_tl_low:*/
-	move.b		(a1),d0
-	btst.b		#4,d0
-	bne		0b /*Lwait_tl_low*/
-
-	move.b		#0x4f,(0xa1000b).l
-	move.b		#0x40,(a1)
+	switch_to_output
 
 	cmp.b		#IOSEQ_R32, d3
 	beq		pcc_io_r32
@@ -402,6 +404,26 @@ tr_do_vdpreg_loop:
 	bra		return
 
 
+pcc_vram_send:
+	/* write VRAM */
+	move.l		#0xc00000,a0
+	move.w		#0x8f02,4(a0)		/* auto increment 2 */
+	move.l		#0,4(a0)		/* VRAM read, addr 0 */
+	move.l		#0x10000/2-1,d4
+
+	switch_to_output
+
+tr_vram_send_loop:
+	move.w		(a0),d3
+	move.w		d3,d0
+	lsr.w		#8,d0
+	bsr		send_byte
+	move.b		d3,d0
+	bsr		send_byte
+	dbra		d4,tr_vram_send_loop
+
+	bra		return
+
 
 
 /* some random code */
@@ -418,7 +440,8 @@ return:
 	move.l		d2,(a1)+
 	move.l		d3,(a1)+
 	move.l		a0,(a1)+
-	bra		return_to_main
+	rts
+#	bra		return_to_main
 
 
 # vim:filetype=asmM68k

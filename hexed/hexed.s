@@ -275,6 +275,33 @@ main:
 	tst.w		(0xc00004).l
 no_tmss:
 
+	/* want to do early PC transfer (with RAM/VRAM intact and such)?
+	 * also give time PC to see start condition */
+	move.l		#0x2000,d0
+0:	dbra		d0,0b
+
+	move.l		#0xa10005,a0
+	btst.b		#5,(a0)
+	bne		no_early_transfer
+move.b #1,(0)
+	move.b		#0x40,(0xa1000b).l	/* port 2 ctrl */
+	move.b		#0x00,(a0)		/* port 2 data - start with TH low */
+	move.l		#0x2000,d0
+0:
+	btst.b		#4,(a0)
+	beq		do_early_transfer
+	dbra		d0,0b
+
+move.b #2,(0)
+	move.b		#0,(0xa1000b).l
+	bra		no_early_transfer	/* timeout */
+
+do_early_transfer:
+move.b #9,(0)
+	bsr		do_transfer
+
+no_early_transfer:
+
 .if COPY_TO_EXP
 	/* copy to expansion device if magic number is set */
 	move.l		#0x400000,a1
@@ -1327,7 +1354,8 @@ wait_tl_low0:
 	bne		wait_tl_low0
 
 	menu_text	txt_working, 13, 13, 0
-	bra		do_transfer
+	bsr		do_transfer
+	bra		return_to_main
 
 # go back to main mode
 return_to_main:

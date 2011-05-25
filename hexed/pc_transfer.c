@@ -193,7 +193,8 @@ static void usage(const char *argv0)
 		"\trecv <file> <addr> <size>\n"
 		"\tjump <addr>\n"
 		"\tio {r{8,16,32} <addr>,w{8,16,32} <addr> <data>}*\n"
-		"\tloadstate <picodrive_savestate>\n", argv0);
+		"\tloadstate <picodrive_savestate>\n"
+		"\trecvvram <file>\n", argv0);
 	exit(1);
 }
 
@@ -404,6 +405,20 @@ int main(int argc, char *argv[])
 			data[i + 1] = tmp;
 		}
 	}
+	else if (strcmp(argv[1], "recvvram") == 0)
+	{
+		if (argc != 3)
+			usage(argv[0]);
+
+		file = fopen(argv[2], "wb");
+		if (file == NULL) {
+			fprintf(stderr, "can't open file: %s\n", argv[2]);
+			return 1;
+		}
+
+		size = 0x10000;
+		memset(data, 0, size);
+	}
 	else
 		usage(argv[0]);
 
@@ -417,18 +432,29 @@ int main(int argc, char *argv[])
 
 	printf("regs: %02x %02x %02x\n",
 		inb(PORT_DATA), inb(PORT_STATUS), inb(PORT_CONTROL));
+
+	/* wait for start condition */
+	if (!(inb(PORT_STATUS) & 0x40))
+		printf("waiting for TH high..\n");
+	while (!(inb(PORT_STATUS) & 0x40))
+		usleep(10000);
+
 	outb(0xe8, PORT_CONTROL);	/* TR low - request for transfer */
 
+	/* wait for request ack */
 	if (inb(PORT_STATUS) & 0x40)
 		printf("waiting for TH low..\n");
-	while (inb(PORT_STATUS) & 0x40)
-		usleep(100000);
+	for (i = 10000; inb(PORT_STATUS) & 0x40; i += 100) {
+		if (i > 100000)
+			i = 100000;
+		usleep(i);
+	}
 
 	outb(0xe0, PORT_CONTROL);
 
 	if (strcmp(argv[1], "send") == 0)
 	{
-		send_cmd(CMD_MD_SEND);
+		send_cmd(CMD_PC_SEND);
 		send_byte((addr >> 16) & 0xff);
 		send_byte((addr >>  8) & 0xff);
 		send_byte((addr >>  0) & 0xff);
@@ -449,7 +475,7 @@ int main(int argc, char *argv[])
 	}
 	else if (strcmp(argv[1], "recv") == 0)
 	{
-		send_cmd(CMD_MD_RECV);
+		send_cmd(CMD_PC_RECV);
 		send_byte((addr >> 16) & 0xff);
 		send_byte((addr >>  8) & 0xff);
 		send_byte((addr >>  0) & 0xff);
@@ -544,6 +570,24 @@ int main(int argc, char *argv[])
 
 			send_byte(data[i]);
 		}
+	}
+	else if (strcmp(argv[1], "recvvram") == 0)
+	{
+		send_cmd(CMD_VRAM_RECV);
+		output_to_input();
+
+		for (i = 0; i < size; i++)
+		{
+			if ((i & 0xff) == 0) {
+				printf("\b\b\b\b\b\b\b\b\b\b\b\b\b");
+				printf("%06x/%06x", i, size);
+				fflush(stdout);
+			}
+
+			data[i] = recv_byte();
+		}
+
+		fwrite(data, 1, size, file);
 	}
 
 	if (size != 0) {
