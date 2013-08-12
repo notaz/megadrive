@@ -1,8 +1,8 @@
 
 CC ?= $(CROSS)gcc
 
-CFLAGS += -Wall -O2 -ggdb
-LDFLAGS += -lusb
+CFLAGS += -Wall -O2 -ggdb -fno-strict-aliasing
+LDLIBS += -lusb
 TARGET = mx_flasher
 
 all: $(TARGET)
