@@ -1072,28 +1072,6 @@ breakloop:
 			goto end;
 	}
 
-	/* set mode */
-	if (mx_mode || w_fsize > 0x200000) {
-		if (mx_mode == 0)
-			mx_mode = '3';
-		printf("MX mode set to ");
-		switch (mx_mode) {
-		case '1':
-			printf("2M with RAM.\n");
-			mx_mode = C_MODE_2M_RAM;
-			break;
-		case '2':
-			printf("4M, no RAM.\n");
-			mx_mode = C_MODE_4M_NORAM;
-			break;
-		default:
-			printf("4M with RAM.\n");
-			mx_mode = C_MODE_4M_RAM;
-			break;
-		}
-		set_ram_mode(device, mx_mode);
-	}
-
 	/* erase */
 	if (do_erase_size != 0) {
 		if (erase_method)
@@ -1147,6 +1125,28 @@ breakloop:
 		ret = write_filename(device, p, FILENAME_RAM);
 		if (ret < 0)
 			fprintf(stderr, "warning: failed to save RAM filename\n");
+	}
+
+	/* set mode */
+	if (mx_mode || w_fsize > 0x200000) {
+		if (mx_mode == 0)
+			mx_mode = '3';
+		printf("MX mode set to ");
+		switch (mx_mode) {
+		case '1':
+			printf("2M with RAM.\n");
+			mx_mode = C_MODE_2M_RAM;
+			break;
+		case '2':
+			printf("4M, no RAM.\n");
+			mx_mode = C_MODE_4M_NORAM;
+			break;
+		default:
+			printf("4M with RAM.\n");
+			mx_mode = C_MODE_4M_RAM;
+			break;
+		}
+		set_ram_mode(device, mx_mode);
 	}
 
 	/* read flash */
