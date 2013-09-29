@@ -203,7 +203,8 @@ sprite_data_end:
 
 predef_addrs:
 	dc.l 0x000000, 0x200000, 0x400000, 0xa00000, 0xa10000
-	dc.l 0xa11100, 0xa12000, 0xa13000, 0xa14000, 0xc00000
+	dc.l 0xa11100, 0xa12000, 0xa13000, 0xa14000, 0xa15100
+	dc.l 0xc00000
 predef_addrs_end:
 
 safe_addrs:
@@ -214,6 +215,10 @@ safe_addrs:
 	dc.l 0xa12000, 0xa120ff
 	dc.l 0xa13000, 0xa130ff
 safe_addrs_end:
+	dc.l 0xa15100, 0xa1513f
+safe_addrs_end_32x:
+	dc.l 0xa15180, 0xa153ff
+safe_addrs_end_32x_vdp:
 
 sizeof_bin:
 	dc.l _edata
@@ -1402,6 +1407,19 @@ get_safety_mask:
 	lsr.l		#8,d1
 	lea		(safe_addrs,pc),a1
 	move.w		#(safe_addrs_end - safe_addrs)/8-1,d2
+	cmp.l		#0x4D415253,(0xa130ec)	/* 'MARS' */
+	bne		no_32x
+	move.w		#(safe_addrs_end_32x - safe_addrs)/8-1,d2
+	move.w		(0xa15100),d0
+	and.w		#3,d0
+	cmp.w		#3,d0			/* ADEN and nRES */
+	bne		no_32x_vdp
+	btst.b		#7,d0			/* FM */
+	bne		no_32x_vdp
+	move.w		#(safe_addrs_end_32x_vdp - safe_addrs)/8-1,d2
+no_32x_vdp:
+no_32x:
+
 0:
 	move.l		(a1)+,d0
 	cmp.l		d0,d1
