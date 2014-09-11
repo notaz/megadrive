@@ -30,7 +30,7 @@
 
 #include "core_pins.h"
 #include "pins_arduino.h"
-#include "HardwareSerial.h"
+//#include "HardwareSerial.h"
 
 #if 0
 // moved to pins_arduino.h
@@ -359,13 +359,13 @@ void _init_Teensyduino_internal_(void)
 	FTM2_SC = FTM_SC_CLKS(1) | FTM_SC_PS(DEFAULT_FTM_PRESCALE);
 #endif
 
-	analog_init();
+	//analog_init();
 	//delay(100); // TODO: this is not necessary, right?
 	delay(4);
 	usb_init();
 }
 
-
+#if 0
 
 static uint8_t analog_write_res = 8;
 
@@ -527,7 +527,7 @@ void analogWriteFrequency(uint8_t pin, uint32_t frequency)
 	}
 }
 
-
+#endif
 
 
 // TODO: startup code needs to initialize all pins to GPIO mode, input by default
