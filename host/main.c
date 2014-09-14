@@ -1,8 +1,6 @@
 #include <stdio.h>
-//#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-//#include <pthread.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -15,35 +13,6 @@
 #include <linux/usb/ch9.h>
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
-
-#if 0
-#include "rawhid/hid.h"
-
-static int g_quit;
-
-static void *dbg_reader(void *arg)
-{
-	char buf[65];
-	int ret;
-
-	buf[64] = 0;
-
-	while (!g_quit) {
-		ret = rawhid_recv(0, buf, 64, 1000);
-		if (ret == 0)
-			continue;
-
-		if (ret != 64) {
-			printf("\nrawhid_recv(dbg): %d\n", ret);
-			return NULL;
-		}
-		printf("%s", buf);
-	}
-
-	// rawhid_close(0);
-	return NULL;
-}
-#endif
 
 struct teensy_dev {
   int fd;
@@ -382,57 +351,6 @@ dev_close:
     close(dev.fd);
     dev.fd = -1;
   }
-
-#if 0
-  ret = rawhid_open(1, 0x16C0, 0x0486, 0xFFC9, 0x0004);
-  if (ret <= 0) {
-    fprintf(stderr, "dbg rawhid is missing\n");
-    return 1;
-  }
-
-  ret = rawhid_open(1, 0x16C0, 0x0486, 0xFFAB, 0x0200);
-  if (ret <= 0) {
-    fprintf(stderr, "data rawhid is missing\n");
-    return 1;
-  }
-
-  pthread_t thread;
-  ret = pthread_create(&thread, NULL, dbg_reader, NULL);
-  if (ret) {
-    fprintf(stderr, "pthread_create failed: %d\n", ret);
-    return 1;
-  }
-
-  memset(buf, 0, sizeof(buf));
-  snprintf(buf, sizeof(buf), "hi");
-
-  ret = rawhid_send(1, buf, 64, 220);
-  if (ret != 64) {
-    fprintf(stderr, "send failed: %d\n", ret);
-  }
-
-  while (1) {
-    // check if any Raw HID packet has arrived
-    ret = rawhid_recv(1, buf, 64, 220);
-    if (ret < 0) {
-      fprintf(stderr, "\nrawhid_recv(1): %d\n", ret);
-      break;
-    }
-    if (ret > 0) {
-      printf("\nrecv %d bytes:\n", ret);
-      for (i=0; i<ret; i++) {
-        printf("%02X ", buf[i] & 255);
-        if (i % 16 == 15 && i < ret-1) printf("\n");
-      }
-      printf("\n");
-    }
-  }
-
-  // rawhid_close(1);
-
-  g_quit = 1;
-  pthread_join(thread, NULL);
-#endif
 
   return 0;
 }
