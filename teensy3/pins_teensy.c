@@ -165,7 +165,7 @@ void porta_isr(void)
 	if ((isfr & CORE_PIN33_BITMASK) && intFunc[33]) intFunc[33]();
 }
 
-void portb_isr(void)
+void portb_isr_orig(void)
 {
 	uint32_t isfr = PORTB_ISFR;
 	PORTB_ISFR = isfr;

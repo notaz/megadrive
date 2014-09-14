@@ -10,7 +10,8 @@ TARGET = test
 # CPPFLAGS += -DUSB_SERIAL -DLAYOUT_US_ENGLISH
 CPPFLAGS += -D__MK20DX256__ -DF_CPU=48000000
 CPPFLAGS += -DUSB_RAWHID
-CPPFLAGS += -Wall -g -Os -mcpu=cortex-m4 -mthumb -nostdlib # -MMD
+CPPFLAGS += -Wall -Wno-format -g -Os
+CPPFLAGS += -mcpu=cortex-m4 -mtune=cortex-m4 -mthumb -nostdlib # -MMD
 CXXFLAGS += -std=gnu++0x -felide-constructors -fno-exceptions -fno-rtti
 LDFLAGS = -Os -Wl,--gc-sections -mcpu=cortex-m4 -mthumb -Tteensy3/mk20dx256.ld
 LDLIBS += -lm
