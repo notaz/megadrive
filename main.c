@@ -44,7 +44,9 @@ void portb_isr(void)
 
 int main(void)
 {
-	//int ret;
+	char buf[64];
+	int timeout;
+	int ret;
 
 	delay(1000); // wait for usb..
 
@@ -75,16 +77,27 @@ int main(void)
 	printf("GPIOD PDDR, PDIR: %08x %08x\n", GPIOD_PDIR, GPIOD_PDDR);
 	printf("PORTB_PCR16: %08x\n", PORTB_PCR16);
 
-	// ret = usb_rawhid_recv(buf, 2000);
 	// ret = usb_rawhid_send(buf, 2000);
 
-	while (1) {
-		delay(4000);
-		fixed_state[1] &= ~0x20;
-		CORE_PIN13_PORTSET = CORE_PIN13_BITMASK;
+	timeout = 1000;
 
-		delay(700);
-		fixed_state[1] |= 0x20;
-		CORE_PIN13_PORTCLEAR = CORE_PIN13_BITMASK;
+	while (1) {
+		ret = usb_rawhid_recv(buf, timeout);
+		if (ret == 64) {
+			CORE_PIN13_PORTSET = CORE_PIN13_BITMASK;
+
+			memcpy(fixed_state, buf, sizeof(fixed_state));
+			timeout = 20;
+		}
+		else if (ret == 0) {
+			CORE_PIN13_PORTCLEAR = CORE_PIN13_BITMASK;
+			timeout = 1000;
+		}
+		else {
+			printf("usb_rawhid_recv: %d\n", ret);
+			timeout = 1000;
+		}
 	}
+
+	return 0;
 }

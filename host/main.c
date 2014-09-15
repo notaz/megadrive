@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <linux/usbdevice_fs.h>
 #include <linux/usb/ch9.h>
+#include <linux/input.h>
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
@@ -231,6 +232,115 @@ out:
   return retval;
 }
 
+/* ?0SA 00DU, ?1CB RLDU */
+#define STATE_BYTES 2
+
+static uint8_t fixed_input_state[STATE_BYTES] = { 0x33, 0x3f };
+
+enum mdbtn {
+  MDBTN_UP = 1,
+  MDBTN_DOWN,
+  MDBTN_LEFT,
+  MDBTN_RIGHT,
+  MDBTN_A,
+  MDBTN_B,
+  MDBTN_C,
+  MDBTN_START,
+};
+
+static const enum mdbtn evdev_md_map[KEY_CNT] = {
+  [KEY_UP]       = MDBTN_UP,
+  [KEY_DOWN]     = MDBTN_DOWN,
+  [KEY_LEFT]     = MDBTN_LEFT,
+  [KEY_RIGHT]    = MDBTN_RIGHT,
+  [KEY_HOME]     = MDBTN_A,
+  [KEY_PAGEDOWN] = MDBTN_B,
+  [KEY_END]      = MDBTN_C,
+  [KEY_LEFTALT]  = MDBTN_START,
+};
+
+int do_evdev_input(int fd)
+{
+  uint8_t old_state[STATE_BYTES];
+  uint8_t changed_bits[STATE_BYTES] = { 0, };
+  struct input_event ev;
+  enum mdbtn mdbtn;
+  int i, ret;
+
+  ret = read(fd, &ev, sizeof(ev));
+  if (ret != sizeof(ev)) {
+    fprintf(stderr, "evdev read %d/%zd: ", ret, sizeof(ev));
+    perror("");
+    return 0;
+  }
+
+  if (ev.type != EV_KEY)
+    return 0;
+
+  if (ev.value != 0 && ev.value != 1)
+    return 0;
+
+  if ((uint32_t)ev.code >= ARRAY_SIZE(evdev_md_map)) {
+    fprintf(stderr, "evdev read bad key: %u\n", ev.code);
+    return 0;
+  }
+
+  mdbtn = evdev_md_map[ev.code];
+  if (mdbtn == 0)
+    return 0;
+
+  memcpy(old_state, fixed_input_state, STATE_BYTES);
+
+  /* ?0SA 00DU, ?1CB RLDU */
+  switch (mdbtn) {
+  case MDBTN_UP:
+    changed_bits[0] = 0x01;
+    changed_bits[1] = 0x01;
+    break;
+  case MDBTN_DOWN:
+    changed_bits[0] = 0x02;
+    changed_bits[1] = 0x02;
+    break;
+  case MDBTN_LEFT:
+    changed_bits[0] = 0x00;
+    changed_bits[1] = 0x04;
+    break;
+  case MDBTN_RIGHT:
+    changed_bits[0] = 0x00;
+    changed_bits[1] = 0x08;
+    break;
+  case MDBTN_A:
+    changed_bits[0] = 0x10;
+    changed_bits[1] = 0x00;
+    break;
+  case MDBTN_B:
+    changed_bits[0] = 0x00;
+    changed_bits[1] = 0x10;
+    break;
+  case MDBTN_C:
+    changed_bits[0] = 0x00;
+    changed_bits[1] = 0x20;
+    break;
+  case MDBTN_START:
+    changed_bits[0] = 0x20;
+    changed_bits[1] = 0x00;
+    break;
+  }
+
+  if (ev.value) {
+    // key press
+    for (i = 0; i < STATE_BYTES; i++)
+      fixed_input_state[i] &= ~changed_bits[i];
+  }
+  else {
+    // key release
+    for (i = 0; i < STATE_BYTES; i++)
+      fixed_input_state[i] |=  changed_bits[i];
+  }
+
+  return memcmp(old_state, fixed_input_state, STATE_BYTES) ? 1 : 0;
+}
+
 enum my_urbs {
   URB_DATA_IN,
   URB_DATA_OUT,
@@ -240,15 +350,44 @@ enum my_urbs {
 
 int main(int argc, char *argv[])
 {
+  char buf_dbg[64 + 1], buf_in[64], buf_out[64];
   struct teensy_dev dev;
   struct usbdevfs_urb urb[URB_CNT];
   struct usbdevfs_urb *reaped_urb;
-  char buf_dbg[64 + 1], buf_in[64];
+  int fixed_input_changed;
+  int evdev_fds[16];
+  int evdev_fd_cnt = 0;
+  int evdev_support;
   int wait_device = 0;
   int dbg_in_sent = 0;
   int data_in_sent = 0;
-  fd_set wfds;
-  int ret;
+  fd_set rfds, wfds;
+  int i, ret;
+  int fd;
+
+  for (i = 1; i < argc; i++) {
+    if (evdev_fd_cnt >= ARRAY_SIZE(evdev_fds)) {
+      fprintf(stderr, "too many evdevs\n");
+      break;
+    }
+		fd = open(argv[i], O_RDONLY);
+    if (fd == -1) {
+      fprintf(stderr, "open %s: ", argv[i]);
+      perror("");
+      continue;
+    }
+    evdev_support = 0;
+		ret = ioctl(fd, EVIOCGBIT(0, sizeof(evdev_support)),
+                &evdev_support);
+    if (ret < 0)
+      perror("EVIOCGBIT");
+    if (!(evdev_support & (1 << EV_KEY))) {
+      fprintf(stderr, "%s doesn't have keys\n", argv[i]);
+      close(fd);
+      continue;
+    }
+    evdev_fds[evdev_fd_cnt++] = fd;
+  }
 
   dev.fd = -1;
 
@@ -302,15 +441,29 @@ int main(int argc, char *argv[])
       dbg_in_sent = 1;
     }
 
+    FD_ZERO(&rfds);
+    for (i = 0; i < evdev_fd_cnt; i++)
+      FD_SET(evdev_fds[i], &rfds);
+
     FD_ZERO(&wfds);
     FD_SET(dev.fd, &wfds);
 
-    ret = select(dev.fd + 1, NULL, &wfds, NULL, NULL);
+    ret = select(dev.fd + 1, &rfds, &wfds, NULL, NULL);
     if (ret < 0) {
       perror("select");
       return 1;
     }
 
+    /* something from input devices? */
+    fixed_input_changed = 0;
+    for (i = 0; i < evdev_fd_cnt; i++) {
+      if (FD_ISSET(evdev_fds[i], &rfds)) {
+        fixed_input_changed |=
+          do_evdev_input(evdev_fds[i]);
+      }
+    }
+
+    /* something from USB? */
     if (FD_ISSET(dev.fd, &wfds)) {
       reaped_urb = NULL;
       ret = ioctl(dev.fd, USBDEVFS_REAPURB, &reaped_urb);
@@ -335,6 +488,8 @@ int main(int argc, char *argv[])
         printf("*data*\n");
         data_in_sent = 0;
       }
+      if (reaped_urb == &urb[URB_DATA_OUT]) {
+      }
       else if (reaped_urb == &urb[URB_DBG_IN]) {
         /* debug text */
         buf_dbg[reaped_urb->actual_length] = 0;
@@ -345,6 +500,25 @@ int main(int argc, char *argv[])
         fprintf(stderr, "reaped unknown urb? %p\n", reaped_urb);
       }
     }
+
+    /* something to send? */
+    if (fixed_input_changed) {
+      memset(buf_out, 0, sizeof(buf_out));
+      memcpy(buf_out, fixed_input_state, sizeof(fixed_input_state));
+
+      memset(&urb[URB_DATA_OUT], 0, sizeof(urb[URB_DATA_OUT]));
+      urb[URB_DATA_OUT].type = USBDEVFS_URB_TYPE_INTERRUPT;
+      urb[URB_DATA_OUT].endpoint = dev.ifaces[0].ep_out;
+      urb[URB_DATA_OUT].buffer = buf_out;
+      urb[URB_DATA_OUT].buffer_length = sizeof(buf_out);
+
+      ret = ioctl(dev.fd, USBDEVFS_SUBMITURB, &urb[URB_DATA_OUT]);
+      if (ret != 0) {
+        perror("USBDEVFS_SUBMITURB URB_DATA_OUT");
+        return 1;
+      }
+    }
+
     continue;
 
 dev_close:
