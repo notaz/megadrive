@@ -8,6 +8,8 @@
 #include <sys/select.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <signal.h>
+#include <termios.h>
 #include <errno.h>
 #include <linux/usbdevice_fs.h>
 #include <linux/usb/ch9.h>
@@ -232,6 +234,55 @@ out:
   return retval;
 }
 
+static int enable_echo(int enable)
+{
+  const char *portname = "/dev/tty";
+  struct termios tty;
+  int retval = -1;
+  int ret;
+  int fd;
+
+  memset(&tty, 0, sizeof(tty));
+
+  fd = open(portname, O_RDWR | O_NOCTTY | O_SYNC);
+  if (fd < 0) {
+    fprintf(stderr, "open %s: ", portname);
+    perror("");
+    return 1;
+  }
+
+  ret = tcgetattr(fd, &tty);
+  if (ret != 0) {
+    perror("tcgetattr");
+    goto out;
+  }
+
+  // printf("lflag: 0%o\n", tty.c_lflag);
+  if (enable)
+    tty.c_lflag |= ECHO;
+  else
+    tty.c_lflag &= ~ECHO;
+
+  ret = tcsetattr(fd, TCSANOW, &tty);
+  if (ret != 0) {
+    perror("tcsetattr");
+    goto out;
+  }
+
+  retval = 0;
+out:
+  close(fd);
+
+  return retval;
+}
+
+static void signal_handler(int sig)
+{
+  enable_echo(1);
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+
 /* ?0SA 00DU, ?1CB RLDU */
 #define STATE_BYTES 2
 
@@ -389,6 +440,9 @@ int main(int argc, char *argv[])
     evdev_fds[evdev_fd_cnt++] = fd;
   }
 
+  enable_echo(0);
+  signal(SIGINT, signal_handler);
+
   dev.fd = -1;
 
   while (1)
@@ -396,7 +450,7 @@ int main(int argc, char *argv[])
     if (dev.fd == -1) {
       ret = find_device(&dev, 0x16C0, 0x0486);
       if (ret < 0)
-        return ret;
+        break;
 
       if (ret == 0) {
         if (!wait_device) {
@@ -422,7 +476,7 @@ int main(int argc, char *argv[])
       ret = ioctl(dev.fd, USBDEVFS_SUBMITURB, &urb[URB_DATA_IN]);
       if (ret != 0) {
         perror("USBDEVFS_SUBMITURB URB_DATA_IN");
-        return 1;
+        break;
       }
       data_in_sent = 1;
     }
@@ -436,7 +490,7 @@ int main(int argc, char *argv[])
       ret = ioctl(dev.fd, USBDEVFS_SUBMITURB, &urb[URB_DBG_IN]);
       if (ret != 0) {
         perror("USBDEVFS_SUBMITURB URB_DBG_IN");
-        return 1;
+        break;
       }
       dbg_in_sent = 1;
     }
@@ -451,7 +505,7 @@ int main(int argc, char *argv[])
     ret = select(dev.fd + 1, &rfds, &wfds, NULL, NULL);
     if (ret < 0) {
       perror("select");
-      return 1;
+      break;
     }
 
     /* something from input devices? */
@@ -471,7 +525,7 @@ int main(int argc, char *argv[])
         if (errno == ENODEV)
           goto dev_close;
         perror("USBDEVFS_REAPURB");
-        return 1;
+        break;
       }
 
       if (reaped_urb != NULL && reaped_urb->status != 0) {
@@ -515,7 +569,7 @@ int main(int argc, char *argv[])
       ret = ioctl(dev.fd, USBDEVFS_SUBMITURB, &urb[URB_DATA_OUT]);
       if (ret != 0) {
         perror("USBDEVFS_SUBMITURB URB_DATA_OUT");
-        return 1;
+        break;
       }
     }
 
@@ -526,7 +580,9 @@ dev_close:
     dev.fd = -1;
   }
 
-  return 0;
+  enable_echo(1);
+
+  return ret;
 }
 
 // vim: ts=2:sw=2:expandtab
