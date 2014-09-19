@@ -1,4 +1,7 @@
-CFLAGS += -Wall -ggdb -O2
+CFLAGS += -Wall -ggdb
+ifndef DEBUG
+CFLAGS += -O2
+endif
 
 all: mega-usb
 
