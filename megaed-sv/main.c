@@ -7,6 +7,7 @@
 #define noinline __attribute__((noinline))
 
 #include "edos.h"
+#include "asmtools.h"
 
 #define GFX_DATA_PORT    0xC00000
 #define GFX_CTRL_PORT    0xC00004
@@ -81,9 +82,6 @@ static void printf_line(int x, const char *buf)
     u32 addr;
     int i;
 
-    if (printf_ypos >= CSCREEN_H) {
-    }
-
     VDP_drawTextML(buf, APLANE, x, printf_ypos++ & (PLANE_H - 1));
 
     if (printf_ypos >= CSCREEN_H) {
@@ -100,29 +98,51 @@ static void printf_line(int x, const char *buf)
     }
 }
 
+#define PRINTF_LEN 40
+
 static noinline int printf(const char *fmt, ...)
 {
+    static const char hexchars[] = "0123456789abcdef";
     static int printf_xpos;
-    char buf[40+11];
+    char c, buf[PRINTF_LEN + 11 + 1];
+    const char *s;
     va_list ap;
     int ival;
+    u32 uval;
     int d = 0;
-    int i;
+    int i, j;
 
     va_start(ap, fmt);
     for (d = 0; *fmt; ) {
-        buf[d] = *fmt++;
-        if (buf[d] != '%') {
-            if (buf[d] == '\n') {
+        int prefix0 = 0;
+        int fwidth = 0;
+
+        c = *fmt++;
+        if (d < PRINTF_LEN)
+            buf[d] = c;
+
+        if (c != '%') {
+            if (c == '\n') {
                 buf[d] = 0;
-                if (d != 0)
-                    printf_line(printf_xpos, buf);
+                printf_line(printf_xpos, buf);
                 d = 0;
                 printf_xpos = 0;
                 continue;
             }
             d++;
             continue;
+        }
+        if (d >= PRINTF_LEN)
+            continue;
+
+        if (*fmt == '0') {
+            prefix0 = 1;
+            fmt++;
+        }
+
+        while ('1' <= *fmt && *fmt <= '9') {
+            fwidth = fwidth * 10 + *fmt - '0';
+            fmt++;
         }
 
         switch (*fmt++) {
@@ -145,12 +165,25 @@ static noinline int printf(const char *fmt, ...)
             }
             buf[d++] = '0' + ival;
             break;
+        case 'x':
+            uval = va_arg(ap, int);
+            while (fwidth > 0 && uval < (1 << (fwidth - 1) * 4)) {
+                buf[d++] = prefix0 ? '0' : ' ';
+                fwidth--;
+            }
+            for (j = 1; j < 8 && uval >= (1 << j * 4); j++)
+                ;
+            for (j--; j >= 0; j--)
+                buf[d++] = hexchars[(uval >> j * 4) & 0x0f];
+            break;
         case 's':
-            // s = va_arg(ap, char *);
+            s = va_arg(ap, char *);
+            while (*s && d < PRINTF_LEN)
+                buf[d++] = *s++;
+            break;
         default:
             // don't handle, for now
             d++;
-            buf[d++] = *fmt++;
             va_arg(ap, void *);
             break;
         }
@@ -181,10 +214,82 @@ void vbl(void)
 {
 }
 
+static int usb_read_while_ready(OsRoutine *ed,
+    void *buf_, int maxlen)
+{
+    u8 *buf = buf_;
+    int r = 0;
+
+    while (ed->usbRdReady() && r < maxlen)
+        buf[r++] = ed->usbReadByte();
+
+    return r;
+}
+
+/*
+ * TH = 1 : ?1CBRLDU    3-button pad return value (not read)
+ * TH = 0 : ?0SA00DU    3-button pad return value
+ * TH = 1 : ?1CBRLDU    3-button pad return value
+ * TH = 0 : ?0SA0000    D3-0 are forced to '0'
+ * TH = 1 : ?1CBMXYZ    Extra buttons returned in D3-0
+ * TH = 0 : ?0SA1111    D3-0 are forced to '1'
+ */
+static void test_joy_latency(int *min_out, int *max_out)
+{
+    u8 rbuf[8 * 6];
+    int min = 8;
+    int max = 0;
+    int i, v, b, e;
+
+    for (i = 0; i < 64; i++) {
+        read_joy_responses(rbuf);
+
+        for (b = 0; b < 8 * 4; b++) {
+            v = b & 7;
+            e = (b & 0x08) ? 0x0c : 0;
+            if ((rbuf[b] & 0x0c) == e) {
+                if (v < min)
+                    min = v;
+            }
+            else if (v > max)
+                max = v;
+        }
+    }
+
+    /* print out the last test */
+    for (b = 0; b < 8 * 5; b++) {
+        printf(" %02x", rbuf[b]);
+        if ((b & 7) == 7)
+            printf("\n");
+    }
+    printf("\n");
+
+    *min_out = min;
+    *max_out = max;
+}
+
+static int do_test(OsRoutine *ed, u8 b3)
+{
+    int min = 0, max = 0;
+
+    switch (b3)
+    {
+    case 'j':
+        test_joy_latency(&min, &max);
+        printf("latency: %d - %d\n\n", min, max);
+        return 0;
+    default:
+        break;
+    }
+
+    return -1;
+}
+
 int main()
 {
     OsRoutine *ed;
-    int i, j = 0;
+    u8 buf[16];
+    int i, d, ret;
 
     ed = (OsRoutine *) *(u32 *)0x1A0;
     ed->memInitDmaCode(); 
@@ -205,16 +310,52 @@ int main()
 
     /* note: relying on ED menu's font setup here.. */
 
-    // VDP_drawTextML("hello", APLANE, 0, 0);
-    printf("hello1");
-    printf(" hello2\n");
-    printf("hello3\n");
-
     for (;;) {
-        for (i = 0; i < 30; i++)
+        if (!ed->usbRdReady()) {
             asm volatile("stop #0x2000");
+            continue;
+        }
 
-        printf("hello %d\n", j++);
+        buf[0] = ed->usbReadByte();
+        if (buf[0] == ' ')
+            continue;
+        if (buf[0] != '*') {
+            d = 1;
+            goto bad_input;
+        }
+
+        /* note: OS uses Twofgsr */
+        buf[1] = ed->usbReadByte();
+        switch (buf[1]) {
+        case 'T':
+            ed->usbWriteByte('k');
+            break;
+        /* custom */
+        case 't':
+            buf[2] = ed->usbReadByte();
+            ret = do_test(ed, buf[2]);
+            if (ret != 0) {
+                d = 3;
+                goto bad_input;
+            }
+            ed->usbWriteByte('k');
+            break;
+        default:
+            d = 2;
+            goto bad_input;
+        }
+
+        continue;
+
+bad_input:
+        ret = usb_read_while_ready(ed, buf + d, sizeof(buf) - d);
+        buf[d + ret] = 0;
+        printf("bad cmd: %s\n", buf);
+        /* consume all remaining data */
+        while (ed->usbRdReady())
+            usb_read_while_ready(ed, buf, sizeof(buf));
+
+        ed->usbWriteByte('b');
     }
 
     return 0;

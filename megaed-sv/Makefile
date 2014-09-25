@@ -10,7 +10,7 @@ CFLAGS += -Wall -g -O1 -m68000 -fomit-frame-pointer
 LDLIBS += $(shell $(CC) -print-file-name=libgcc.a)
 
 TARGET = megaedsv
-OBJS = sega_gcc.o main.o
+OBJS = sega_gcc.o main.o asmtools.o
 
 all: $(TARGET).bin
 
