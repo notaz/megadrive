@@ -20,18 +20,32 @@
         .ascii "                         "
         .ascii "JUE             "
 
-/* magic ED app init */
 RST:
+	move.w		#0x2700, sr
+/* magic ED app init */
 	move.w #0x0000, (0xA13006)
 	jmp init_ed.l
 init_ed:
-	move.w #0x210f, (0xA13006)
+/* relocate to bank a, so that other ROMs can be loaded */
+	move.w #0x0a0f, (0xA13006)
+	movea.l #0x100000, %a0
+	movea.l #0x200000, %a1
+	move.l #0x100000/4/4-1, %d0
+0:
+	move.l (a0)+, (a1)+
+	move.l (a0)+, (a1)+
+	move.l (a0)+, (a1)+
+	move.l (a0)+, (a1)+
+	dbra %d0, 0b
+
+	move.w #0x10af, (0xA13006)
 	move.l #HBL, (0x70)
 	move.l #VBL, (0x78)
 
-	moveq   #0,%d0
-	movea.l %d0,%a7
-	move    %a7,%usp
+	moveq   #0, %d0
+	movea.l %d0, %a7
+	move    %a7, %usp
+	move.w  #0x2000, sr
 	bra     main
 
 INT:

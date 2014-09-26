@@ -24,6 +24,12 @@
 #define APLANE           (TILE_MEM_END + 0x1000)
 #define BPLANE           (TILE_MEM_END + 0x3000)
 
+#define read8(a) \
+    *((volatile u8 *) (a))
+#define read16(a) \
+    *((volatile u16 *) (a))
+#define read32(a) \
+    *((volatile u32 *) (a))
 #define write16(a, d) \
     *((volatile u16 *) (a)) = (d)
 #define write32(a, d) \
@@ -285,10 +291,60 @@ static int do_test(OsRoutine *ed, u8 b3)
     return -1;
 }
 
+#define MTYPE_OS 0
+#define MTYPE_MD 1
+#define MTYPE_SSF 2
+#define MTYPE_CD 3
+#define MTYPE_SMS 4
+#define MTYPE_10M 5
+#define MTYPE_32X 6
+
+static int do_run(OsRoutine *ed, u8 b3)
+{
+    u8 mapper = 0;
+
+    switch (b3)
+    {
+    case 's':
+        mapper = MTYPE_SMS | (7 << 4);
+        break;
+    case 'm':
+        mapper = MTYPE_MD;
+        break;
+    case 'o':
+        mapper = MTYPE_OS;
+        break;
+    case 'c':
+        mapper = MTYPE_CD;
+        break;
+    case '3':
+        mapper = MTYPE_32X;
+        break;
+    case 'M':
+        mapper = MTYPE_10M;
+        break;
+    default:
+        return -1;
+    }
+
+    while (read32(GFX_CTRL_PORT) & 2)
+        ;
+    ed->VDP_setReg(VDP_MODE1, 0x04); 
+    ed->VDP_setReg(VDP_MODE2, 0x44); 
+
+    ed->usbWriteByte('k');
+
+    run_game(mapper);
+    /* should not get here.. */
+
+    return -1;
+}
+
 int main()
 {
     OsRoutine *ed;
     u8 buf[16];
+    int len;
     int i, d, ret;
 
     ed = (OsRoutine *) *(u32 *)0x1A0;
@@ -310,6 +366,10 @@ int main()
 
     /* note: relying on ED menu's font setup here.. */
 
+    printf("version: %02x\n", read8(0xa10001));
+    printf("ED os/fw: %x/%x\n\n", ed->osGetOsVersion(),
+           ed->osGetFirmVersion());
+
     for (;;) {
         if (!ed->usbRdReady()) {
             asm volatile("stop #0x2000");
@@ -330,6 +390,24 @@ int main()
         case 'T':
             ed->usbWriteByte('k');
             break;
+        case 'g':
+            len = ed->usbReadByte() * 128;
+            printf("loading %d bytes.. ", len * 512);
+            ed->usbWriteByte('k');
+            ed->usbReadDma((void *)0x200000, len);
+            ed->usbWriteByte('d');
+            printf("done\n");
+            break;
+        case 'r':
+            buf[2] = ed->usbReadByte();
+            ret = do_run(ed, buf[2]);
+            if (ret != 0) {
+                d = 3;
+                goto bad_input;
+            }
+            printf("run returned??\n");
+            break;
+
         /* custom */
         case 't':
             buf[2] = ed->usbReadByte();
