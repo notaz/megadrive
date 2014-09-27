@@ -13,6 +13,8 @@
 #include "edos.h"
 #include "asmtools.h"
 
+extern u16 start_hvc;
+
 #define GFX_DATA_PORT    0xC00000
 #define GFX_CTRL_PORT    0xC00004
 
@@ -22,7 +24,7 @@
 #define TILE_FONT_BASE   (TILE_MEM_END / 32  - FONT_LEN)
 
 /* note: using ED menu's layout here.. */
-#define WPLAN            (TILE_MEM_END + 0x0000)
+#define WPLANE           (TILE_MEM_END + 0x0000)
 #define HSCRL            (TILE_MEM_END + 0x0800)
 #define SLIST            (TILE_MEM_END + 0x0C00)
 #define APLANE           (TILE_MEM_END + 0x1000)
@@ -384,7 +386,7 @@ static int do_test(OsRoutine *ed, u8 b3)
 #define MTYPE_10M 5
 #define MTYPE_32X 6
 
-static int do_run(OsRoutine *ed, u8 b3)
+static int do_run(OsRoutine *ed, u8 b3, int tas_sync)
 {
     u8 mapper = 0;
 
@@ -412,14 +414,16 @@ static int do_run(OsRoutine *ed, u8 b3)
         return -1;
     }
 
-    while (read32(GFX_CTRL_PORT) & 2)
+    printf("starting mapper %x..\n", mapper);
+
+    while (read16(GFX_CTRL_PORT) & 2)
         ;
     ed->VDP_setReg(VDP_MODE1, 0x04); 
     ed->VDP_setReg(VDP_MODE2, 0x44); 
 
     ed->usbWriteByte('k');
 
-    run_game(mapper);
+    run_game(mapper, tas_sync);
     /* should not get here.. */
 
     return -1;
@@ -451,7 +455,8 @@ int main()
 
     /* note: relying on ED menu's font setup here.. */
 
-    printf("version: %02x\n", read8(0xa10001));
+    printf("version: %02x, start_hvc: %04x\n",
+           read8(0xa10001), start_hvc);
     printf("ED os/fw: %x/%x\n\n", ed->osGetOsVersion(),
            ed->osGetFirmVersion());
 
@@ -484,8 +489,9 @@ int main()
             printf("done\n");
             break;
         case 'r':
+        case 'R':
             buf[2] = ed->usbReadByte();
-            ret = do_run(ed, buf[2]);
+            ret = do_run(ed, buf[2], buf[1] == 'R');
             if (ret != 0) {
                 d = 3;
                 goto bad_input;

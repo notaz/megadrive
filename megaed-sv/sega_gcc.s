@@ -22,6 +22,7 @@ exc_tab:
     .ascii "JUE             "
 
 RST:
+	move.w      (0xc00008), start_hvc
 	move.w		#0x2700, %sr
 /* magic ED app init */
 	move.w #0x0000, (0xA13006)
@@ -211,5 +212,11 @@ exc_stub 3c
 exc_stub 3d
 exc_stub 3e
 exc_stub 3f
+
+.bss
+.align 2
+.global start_hvc
+start_hvc:
+    .word 0
 
 # vim:filetype=asmM68k:ts=4:sw=4:expandtab
