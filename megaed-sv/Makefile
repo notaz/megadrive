@@ -17,6 +17,11 @@ all: $(TARGET).bin
 $(TARGET).elf: $(OBJS)
 	$(LD) -o $@ -Ted_app.ld -Map $(TARGET).map $^ $(LDLIBS)
 
+$(TARGET)_e.bin: $(TARGET).bin
+	dd if=/dev/zero of=$@ bs=1M count=1
+	dd if=$^ of=$@ bs=1M seek=1
+	dd if=$^ of=$@ conv=notrunc
+
 clean:
 	$(RM) $(TARGET).bin $(OBJS) $(TARGET).elf $(TARGET).map
 

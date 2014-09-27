@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <stdarg.h>
 
 #define u8      unsigned char
@@ -5,6 +6,9 @@
 #define u32     unsigned int
 
 #define noinline __attribute__((noinline))
+#define _packed __attribute__((packed))
+
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
 #include "edos.h"
 #include "asmtools.h"
@@ -100,7 +104,7 @@ static void printf_line(int x, const char *buf)
 
         /* scroll plane */
         write32(GFX_CTRL_PORT, GFX_WRITE_VSRAM_ADDR(0));
-        write16(GFX_DATA_PORT, (printf_ypos - 27) * 8);
+        write16(GFX_DATA_PORT, (printf_ypos - CSCREEN_H + 1) * 8);
     }
 }
 
@@ -173,7 +177,7 @@ static noinline int printf(const char *fmt, ...)
             break;
         case 'x':
             uval = va_arg(ap, int);
-            while (fwidth > 0 && uval < (1 << (fwidth - 1) * 4)) {
+            while (fwidth > 1 && uval < (1 << (fwidth - 1) * 4)) {
                 buf[d++] = prefix0 ? '0' : ' ';
                 fwidth--;
             }
@@ -207,13 +211,94 @@ static noinline int printf(const char *fmt, ...)
     return d; // wrong..
 }
 
-void exception(void)
+static const char *exc_names[] = {
+    NULL,
+    NULL,
+    "Bus Error",
+    "Address Error",
+    "Illegal Instruction",
+    "Zero Divide",
+    "CHK Instruction",
+    "TRAPV Instruction",
+    "Privilege Violation",  /*  8  8 */
+    "Trace",
+    "Line 1010 Emulator",
+    "Line 1111 Emulator",
+    NULL,
+    NULL,
+    NULL,
+    "Uninitialized Interrupt",
+    NULL,                   /* 10 16 */
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    "Spurious Interrupt",   /* 18 24 */
+    "l1 irq",
+    "l2 irq",
+    "l3 irq",
+    "l4 irq",
+    "l5 irq",
+    "l6 irq",
+    "l7 irq",
+};
+
+struct exc_frame {
+    u32 dr[8];
+    u32 ar[8];
+    u16 ecxnum; // from handler
+    union {
+        struct {
+            u16 sr;
+            u32 pc;
+        } g _packed;
+        struct {
+            u16 fc;
+            u32 addr;
+            u16 ir;
+            u16 sr;
+            u32 pc;
+        } bae _packed; // bus/address error frame
+    };
+} _packed;
+
+int xtttt(void) { return sizeof(struct exc_frame); }
+
+void exception(const struct exc_frame *f)
 {
-    VDP_drawTextML("============", APLANE, 0, 0);
-    VDP_drawTextML(" exception! ", APLANE, 0, 1);
-    VDP_drawTextML("============", APLANE, 0, 2);
-    while (1)
+    int i;
+
+    while (read16(GFX_CTRL_PORT) & 2)
         ;
+    write16(GFX_CTRL_PORT, 0x8000 | (VDP_MODE1 << 8) | 0x04);
+    write16(GFX_CTRL_PORT, 0x8000 | (VDP_MODE2 << 8) | 0x44);
+    /* adjust scroll */
+    write32(GFX_CTRL_PORT, GFX_WRITE_VSRAM_ADDR(0));
+    write16(GFX_DATA_PORT,
+      printf_ypos >= CSCREEN_H ?
+        (printf_ypos - CSCREEN_H + 1) * 8 : 0);
+
+    printf("exception %i ", f->ecxnum);
+    if (f->ecxnum < ARRAY_SIZE(exc_names) && exc_names[f->ecxnum] != NULL)
+        printf("(%s)", exc_names[f->ecxnum]);
+    if (f->ecxnum < 4)
+        printf(" (%s)", (f->bae.fc & 0x10) ? "r" : "w");
+    printf("    \n");
+
+    if (f->ecxnum < 4) {
+        printf("  PC: %08x SR: %04x    \n", f->bae.pc, f->bae.sr);
+        printf("addr: %08x IR: %04x FC: %02x   \n",
+               f->bae.addr, f->bae.ir, f->bae.fc);
+    }
+    else {
+        printf("  PC: %08x SR: %04x    \n", f->g.pc, f->g.sr);
+    }
+    for (i = 0; i < 8; i++)
+        printf("  D%d: %08x A%d: %08x    \n", i, f->dr[i], i, f->ar[i]);
+    printf("                       \n");
 }
 
 void vbl(void)
