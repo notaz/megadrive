@@ -26,11 +26,7 @@ void yield(void)
 {
 }
 
-static void pin0_irq(void)
-{
-}
-
-void portb_isr(void)
+static void my_portb_isr(void)
 {
 	uint32_t isfr;
 
@@ -58,7 +54,8 @@ int main(void)
 	// t pin     0 20  6  8  7 14  2
 	// * - note: tl/tr mixed in most docs
 	pinMode(0, INPUT);
-	attachInterrupt(0, pin0_irq, CHANGE);
+	attachInterrupt(0, my_portb_isr, CHANGE);
+	attachInterruptVector(IRQ_PORTB, my_portb_isr);
 
 	pinMode( 2, OUTPUT);
 	pinMode(14, OUTPUT);

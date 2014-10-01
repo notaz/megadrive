@@ -10,10 +10,10 @@
  * permit persons to whom the Software is furnished to do so, subject to
  * the following conditions:
  *
- * 1. The above copyright notice and this permission notice shall be 
+ * 1. The above copyright notice and this permission notice shall be
  * included in all copies or substantial portions of the Software.
  *
- * 2. If the Software is incorporated into a build system that allows 
+ * 2. If the Software is incorporated into a build system that allows
  * selection among a list of target devices, then similar target
  * devices manufactured by PJRC.COM must be included in the list of
  * target devices and selectable in the same manner.
@@ -107,7 +107,30 @@ static inline uint8_t digitalPinToTimer(uint8_t pin)
 	return NOT_ON_TIMER;
 }
 
-
+// These serial port names are intended to allow libraries and architecture-neutral
+// sketches to automatically default to the correct port name for a particular type
+// of use. For example, a GPS module would normally connect to SERIAL_PORT_HARDWARE_OPEN,
+// the first hardware serial port whose RX/TX pins are not dedicated to another use.
+//
+// SERIAL_PORT_MONITOR Port which normally prints to the Arduino Serial Monitor
+//
+// SERIAL_PORT_USBVIRTUAL Port which is USB virtual serial
+//
+// SERIAL_PORT_LINUXBRIDGE Port which connects to a Linux system via Bridge library
+//
+// SERIAL_PORT_HARDWARE Hardware serial port, physical RX & TX pins.
+//
+// SERIAL_PORT_HARDWARE_OPEN Hardware serial ports which are open for use. Their RX & TX
+// pins are NOT connected to anything by default.
+//
+#define SERIAL_PORT_MONITOR		Serial
+#define SERIAL_PORT_USBVIRTUAL		Serial
+#define SERIAL_PORT_HARDWARE		Serial1
+#define SERIAL_PORT_HARDWARE1		Serial2
+#define SERIAL_PORT_HARDWARE2		Serial3
+#define SERIAL_PORT_HARDWARE_OPEN	Serial1
+#define SERIAL_PORT_HARDWARE_OPEN1	Serial2
+#define SERIAL_PORT_HARDWARE_OPEN2	Serial3
 
 
 #endif

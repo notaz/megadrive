@@ -116,6 +116,11 @@ void init_pin_interrupts(void)
 	// fast interrupts will still be serviced quickly?
 }
 
+void attachInterruptVector(enum IRQ_NUMBER_t irq, void (*function)(void))
+{
+	_VectorsRam[irq + 16] = function;
+}
+
 void attachInterrupt(uint8_t pin, void (*function)(void), int mode)
 {
 	volatile uint32_t *config;
@@ -165,7 +170,7 @@ void porta_isr(void)
 	if ((isfr & CORE_PIN33_BITMASK) && intFunc[33]) intFunc[33]();
 }
 
-void portb_isr_orig(void)
+void portb_isr(void)
 {
 	uint32_t isfr = PORTB_ISFR;
 	PORTB_ISFR = isfr;
@@ -320,11 +325,36 @@ extern void usb_init(void);
 
 
 // create a default PWM at the same 488.28 Hz as Arduino Uno
-#if F_BUS == 48000000
+
+#if F_BUS == 60000000
+#define DEFAULT_FTM_MOD (61440 - 1)
+#define DEFAULT_FTM_PRESCALE 1
+#elif F_BUS == 56000000
+#define DEFAULT_FTM_MOD (57344 - 1)
+#define DEFAULT_FTM_PRESCALE 1
+#elif F_BUS == 48000000
 #define DEFAULT_FTM_MOD (49152 - 1)
 #define DEFAULT_FTM_PRESCALE 1
-#else
+#elif F_BUS == 40000000
+#define DEFAULT_FTM_MOD (40960 - 1)
+#define DEFAULT_FTM_PRESCALE 1
+#elif F_BUS == 36000000
+#define DEFAULT_FTM_MOD (36864 - 1)
+#define DEFAULT_FTM_PRESCALE 1
+#elif F_BUS == 24000000
 #define DEFAULT_FTM_MOD (49152 - 1)
+#define DEFAULT_FTM_PRESCALE 0
+#elif F_BUS == 16000000
+#define DEFAULT_FTM_MOD (32768 - 1)
+#define DEFAULT_FTM_PRESCALE 0
+#elif F_BUS == 8000000
+#define DEFAULT_FTM_MOD (16384 - 1)
+#define DEFAULT_FTM_PRESCALE 0
+#elif F_BUS == 4000000
+#define DEFAULT_FTM_MOD (8192 - 1)
+#define DEFAULT_FTM_PRESCALE 0
+#elif F_BUS == 2000000
+#define DEFAULT_FTM_MOD (4096 - 1)
 #define DEFAULT_FTM_PRESCALE 0
 #endif
 
@@ -525,6 +555,14 @@ void analogWriteFrequency(uint8_t pin, uint32_t frequency)
 		FTM0_MOD = mod;
 		FTM0_SC = FTM_SC_CLKS(1) | FTM_SC_PS(prescale);
 	}
+#if defined(__MK20DX256__)
+	  else if (pin == 25 || pin == 32) {
+		FTM2_SC = 0;
+		FTM2_CNT = 0;
+		FTM2_MOD = mod;
+		FTM2_SC = FTM_SC_CLKS(1) | FTM_SC_PS(prescale);
+	}
+#endif
 }
 
 #endif
@@ -685,12 +723,29 @@ void delay(uint32_t ms)
 	}
 }
 
-#if F_CPU == 96000000
+// TODO: verify these result in correct timeouts...
+#if F_CPU == 168000000
+#define PULSEIN_LOOPS_PER_USEC 25
+#elif F_CPU == 144000000
+#define PULSEIN_LOOPS_PER_USEC 21
+#elif F_CPU == 120000000
+#define PULSEIN_LOOPS_PER_USEC 18
+#elif F_CPU == 96000000
 #define PULSEIN_LOOPS_PER_USEC 14
+#elif F_CPU == 72000000
+#define PULSEIN_LOOPS_PER_USEC 10
 #elif F_CPU == 48000000
 #define PULSEIN_LOOPS_PER_USEC 7
 #elif F_CPU == 24000000
 #define PULSEIN_LOOPS_PER_USEC 4
+#elif F_CPU == 16000000
+#define PULSEIN_LOOPS_PER_USEC 1
+#elif F_CPU == 8000000
+#define PULSEIN_LOOPS_PER_USEC 1
+#elif F_CPU == 4000000
+#define PULSEIN_LOOPS_PER_USEC 1
+#elif F_CPU == 2000000
+#define PULSEIN_LOOPS_PER_USEC 1
 #endif
 
 
