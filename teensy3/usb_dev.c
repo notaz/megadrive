@@ -531,13 +531,13 @@ usb_packet_t *usb_rx(uint32_t endpoint)
 	usb_packet_t *ret;
 	endpoint--;
 	if (endpoint >= NUM_ENDPOINTS) return NULL;
-	__disable_irq();
+	__mask_irq();
 	ret = rx_first[endpoint];
 	if (ret) {
 		rx_first[endpoint] = ret->next;
 		usb_rx_byte_count_data[endpoint] -= ret->len;
 	}
-	__enable_irq();
+	__unmask_irq();
 	//serial_print("rx, epidx=");
 	//serial_phex(endpoint);
 	//serial_print(", packet=");
@@ -550,11 +550,11 @@ static uint32_t usb_queue_byte_count(const usb_packet_t *p)
 {
 	uint32_t count=0;
 
-	__disable_irq();
+	__mask_irq();
 	for ( ; p; p = p->next) {
 		count += p->len;
 	}
-	__enable_irq();
+	__unmask_irq();
 	return count;
 }
 
@@ -583,9 +583,9 @@ uint32_t usb_tx_packet_count(uint32_t endpoint)
 
 	endpoint--;
 	if (endpoint >= NUM_ENDPOINTS) return 0;
-	__disable_irq();
+	__mask_irq();
 	for (p = tx_first[endpoint]; p; p = p->next) count++;
-	__enable_irq();
+	__unmask_irq();
 	return count;
 }
 
@@ -605,14 +605,14 @@ void usb_rx_memory(usb_packet_t *packet)
 
 	cfg = usb_endpoint_config_table;
 	//serial_print("rx_mem:");
-	__disable_irq();
+	__mask_irq();
 	for (i=1; i <= NUM_ENDPOINTS; i++) {
 		if (*cfg++ & USB_ENDPT_EPRXEN) {
 			if (table[index(i, RX, EVEN)].desc == 0) {
 				table[index(i, RX, EVEN)].addr = packet->buf;
 				table[index(i, RX, EVEN)].desc = BDT_DESC(64, 0);
 				usb_rx_memory_needed--;
-				__enable_irq();
+				__unmask_irq();
 				//serial_phex(i);
 				//serial_print(",even\n");
 				return;
@@ -621,14 +621,14 @@ void usb_rx_memory(usb_packet_t *packet)
 				table[index(i, RX, ODD)].addr = packet->buf;
 				table[index(i, RX, ODD)].desc = BDT_DESC(64, 1);
 				usb_rx_memory_needed--;
-				__enable_irq();
+				__unmask_irq();
 				//serial_phex(i);
 				//serial_print(",odd\n");
 				return;
 			}
 		}
 	}
-	__enable_irq();
+	__unmask_irq();
 	// we should never reach this point.  If we get here, it means
 	// usb_rx_memory_needed was set greater than zero, but no memory
 	// was actually needed.
@@ -647,7 +647,7 @@ void usb_tx(uint32_t endpoint, usb_packet_t *packet)
 
 	endpoint--;
 	if (endpoint >= NUM_ENDPOINTS) return;
-	__disable_irq();
+	__mask_irq();
 	//serial_print("txstate=");
 	//serial_phex(tx_state[endpoint]);
 	//serial_print("\n");
@@ -673,13 +673,13 @@ void usb_tx(uint32_t endpoint, usb_packet_t *packet)
 			tx_last[endpoint]->next = packet;
 		}
 		tx_last[endpoint] = packet;
-		__enable_irq();
+		__unmask_irq();
 		return;
 	}
 	tx_state[endpoint] = next;
 	b->addr = packet->buf;
 	b->desc = BDT_DESC(packet->len, ((uint32_t)b & 8) ? DATA1 : DATA0);
-	__enable_irq();
+	__unmask_irq();
 }
 
 

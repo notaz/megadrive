@@ -2551,6 +2551,17 @@ typedef struct __attribute__((packed)) {
 #define __disable_irq() __asm__ volatile("CPSID i");
 #define __enable_irq()	__asm__ volatile("CPSIE i");
 
+/* only mask default irqs, see NVIC_SET_PRIORITY users
+ * note: usb code uses 112 priority */
+#define __mask_irq() do { \
+  int basepri_ = 128 - 16; \
+  __asm__ volatile("msr BASEPRI, %0" :: "r"(basepri_)); \
+} while (0)
+#define __unmask_irq() do { \
+  int basepri_ = 0; \
+  __asm__ volatile("msr BASEPRI, %0" :: "r"(basepri_)); \
+} while (0)
+
 // System Control Space (SCS), ARMv7 ref manual, B3.2, page 708
 #define SCB_CPUID		(*(const    uint32_t *)0xE000ED00) // CPUID Base Register
 #define SCB_ICSR		(*(volatile uint32_t *)0xE000ED04) // Interrupt Control and State
