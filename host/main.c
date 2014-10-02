@@ -14,6 +14,7 @@
 #include <linux/usbdevice_fs.h>
 #include <linux/usb/ch9.h>
 #include <linux/input.h>
+#include "../pkts.h"
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
@@ -392,6 +393,29 @@ int do_evdev_input(int fd)
   return memcmp(old_state, fixed_input_state, STATE_BYTES) ? 1 : 0;
 }
 
+struct gmv_tas {
+  char sig[15];
+  char ver;
+  uint32_t rerecord_count;
+  char ctrl1;
+  char ctrl2;
+  uint16_t flags;
+  char name[40];
+  uint8_t data[0][3];
+};
+
+static int submit_urb(int fd, struct usbdevfs_urb *urb, int ep,
+  void *buf, size_t buf_size)
+{
+  memset(urb, 0, sizeof(*urb));
+  urb->type = USBDEVFS_URB_TYPE_INTERRUPT;
+  urb->endpoint = ep;
+  urb->buffer = buf;
+  urb->buffer_length = buf_size;
+
+  return ioctl(fd, USBDEVFS_SUBMITURB, urb);
+}
+
 enum my_urbs {
   URB_DATA_IN,
   URB_DATA_OUT,
@@ -401,7 +425,7 @@ enum my_urbs {
 
 int main(int argc, char *argv[])
 {
-  char buf_dbg[64 + 1], buf_in[64], buf_out[64];
+  const char *tasfn = NULL;
   struct teensy_dev dev;
   struct usbdevfs_urb urb[URB_CNT];
   struct usbdevfs_urb *reaped_urb;
@@ -413,22 +437,44 @@ int main(int argc, char *argv[])
   int dbg_in_sent = 0;
   int data_in_sent = 0;
   fd_set rfds, wfds;
+  struct gmv_tas *gmv = NULL;
+  int enable_sent = 0;
+  int frame_count = 0;
+  int frames_sent = 0;
+  char buf_dbg[64 + 1];
+  struct tas_pkt pkt_in;
+  struct tas_pkt pkt_out;
+  struct timeval *timeout = NULL;
+  struct timeval tout;
   int i, ret;
   int fd;
 
   for (i = 1; i < argc; i++) {
+    if (argv[i][0] == '-') {
+      if (strcmp(argv[i], "-m") != 0) {
+        fprintf(stderr, "bad arg: %s\n", argv[i]);
+        return 1;
+      }
+      i++;
+      if (argv[i] == NULL) {
+        fprintf(stderr, "missing arg\n");
+        return 1;
+      }
+      tasfn = argv[i];
+      continue;
+    }
     if (evdev_fd_cnt >= ARRAY_SIZE(evdev_fds)) {
       fprintf(stderr, "too many evdevs\n");
       break;
     }
-		fd = open(argv[i], O_RDONLY);
+    fd = open(argv[i], O_RDONLY);
     if (fd == -1) {
       fprintf(stderr, "open %s: ", argv[i]);
       perror("");
       continue;
     }
     evdev_support = 0;
-		ret = ioctl(fd, EVIOCGBIT(0, sizeof(evdev_support)),
+    ret = ioctl(fd, EVIOCGBIT(0, sizeof(evdev_support)),
                 &evdev_support);
     if (ret < 0)
       perror("EVIOCGBIT");
@@ -438,6 +484,72 @@ int main(int argc, char *argv[])
       continue;
     }
     evdev_fds[evdev_fd_cnt++] = fd;
+  }
+
+  if (tasfn != NULL) {
+    long size;
+    FILE *f;
+    
+    f = fopen(tasfn, "rb");
+    if (f == NULL) {
+      fprintf(stderr, "fopen %s: ", tasfn);
+      perror("");
+      return 1;
+    }
+
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size < (long)sizeof(*gmv)) {
+      fprintf(stderr, "bad gmv size: %ld\n", size);
+      return 1;
+    }
+    gmv = malloc(size);
+    if (gmv == NULL) {
+      fprintf(stderr, "OOM?\n");
+      return 1;
+    }
+    ret = fread(gmv, 1, size, f);
+    if (ret != size) {
+      fprintf(stderr, "fread %d/%ld: ", ret, size);
+      perror("");
+      return 1;
+    }
+    fclose(f);
+    frame_count = (size - sizeof(*gmv)) / 3;
+
+    /* check the GMV.. */
+    if (frame_count <= 0 || size != sizeof(*gmv) + frame_count * 3) {
+      fprintf(stderr, "broken gmv? frames=%d\n", frame_count);
+      return 1;
+    }
+
+    if (strncmp(gmv->sig, "Gens Movie TEST", 15) != 0) {
+      fprintf(stderr, "bad GMV sig\n");
+      return 1;
+    }
+    if (gmv->ctrl1 != '3') {
+      fprintf(stderr, "unhandled controlled config: '%c'\n", gmv->ctrl1);
+      //return 1;
+    }
+    if (gmv->ver >= 'A') {
+      if (gmv->flags & 0x40) {
+        fprintf(stderr, "unhandled flag: movie requires a savestate\n");
+        return 1;
+      }
+      if (gmv->flags & 0x20) {
+        fprintf(stderr, "unhandled flag: 3-player movie\n");
+        return 1;
+      }
+      if (gmv->flags & ~0x80) {
+        fprintf(stderr, "unhandled flag(s): %04x\n", gmv->flags);
+        //return 1;
+      }
+    }
+    gmv->name[39] = 0;
+    printf("loaded GMV: %s\n", gmv->name);
+    printf("%d frames, %u rerecords\n",
+           frame_count, gmv->rerecord_count);
   }
 
   enable_echo(0);
@@ -464,34 +576,35 @@ int main(int argc, char *argv[])
       wait_device = 0;
       data_in_sent = 0;
       dbg_in_sent = 0;
+      enable_sent = 0;
+      frames_sent = 0;
+
+      /* we wait first, then send commands, but if teensy
+       * is started already, it won't send anything */
+      tout.tv_sec = 1;
+      tout.tv_usec = 0;
+      timeout = &tout;
     }
 
     if (!data_in_sent) {
-      memset(&urb[URB_DATA_IN], 0, sizeof(urb[URB_DATA_IN]));
-      urb[URB_DATA_IN].type = USBDEVFS_URB_TYPE_INTERRUPT;
-      urb[URB_DATA_IN].endpoint = dev.ifaces[0].ep_in;
-      urb[URB_DATA_IN].buffer = buf_in;
-      urb[URB_DATA_IN].buffer_length = sizeof(buf_in);
-
-      ret = ioctl(dev.fd, USBDEVFS_SUBMITURB, &urb[URB_DATA_IN]);
+      memset(&pkt_in, 0, sizeof(pkt_in));
+      ret = submit_urb(dev.fd, &urb[URB_DATA_IN], dev.ifaces[0].ep_in,
+                       &pkt_in, sizeof(pkt_in));
       if (ret != 0) {
         perror("USBDEVFS_SUBMITURB URB_DATA_IN");
         break;
       }
+
       data_in_sent = 1;
     }
     if (!dbg_in_sent) {
-      memset(&urb[URB_DBG_IN], 0, sizeof(urb[URB_DBG_IN]));
-      urb[URB_DBG_IN].type = USBDEVFS_URB_TYPE_INTERRUPT;
-      urb[URB_DBG_IN].endpoint = dev.ifaces[1].ep_in;
-      urb[URB_DBG_IN].buffer = buf_dbg;
-      urb[URB_DBG_IN].buffer_length = sizeof(buf_dbg) - 1;
-
-      ret = ioctl(dev.fd, USBDEVFS_SUBMITURB, &urb[URB_DBG_IN]);
+      ret = submit_urb(dev.fd, &urb[URB_DBG_IN], dev.ifaces[1].ep_in,
+                       buf_dbg, sizeof(buf_dbg) - 1);
       if (ret != 0) {
         perror("USBDEVFS_SUBMITURB URB_DBG_IN");
         break;
       }
+
       dbg_in_sent = 1;
     }
 
@@ -502,11 +615,12 @@ int main(int argc, char *argv[])
     FD_ZERO(&wfds);
     FD_SET(dev.fd, &wfds);
 
-    ret = select(dev.fd + 1, &rfds, &wfds, NULL, NULL);
+    ret = select(dev.fd + 1, &rfds, &wfds, NULL, timeout);
     if (ret < 0) {
       perror("select");
       break;
     }
+    timeout = NULL;
 
     /* something from input devices? */
     fixed_input_changed = 0;
@@ -518,7 +632,8 @@ int main(int argc, char *argv[])
     }
 
     /* something from USB? */
-    if (FD_ISSET(dev.fd, &wfds)) {
+    if (FD_ISSET(dev.fd, &wfds))
+    {
       reaped_urb = NULL;
       ret = ioctl(dev.fd, USBDEVFS_REAPURB, &reaped_urb);
       if (ret != 0) {
@@ -530,7 +645,11 @@ int main(int argc, char *argv[])
 
       if (reaped_urb != NULL && reaped_urb->status != 0) {
         errno = -reaped_urb->status;
-        perror("urb status");
+        if ((unsigned long)(reaped_urb - urb) < ARRAY_SIZE(urb))
+          fprintf(stderr, "urb #%zu: ", reaped_urb - urb);
+        else
+          fprintf(stderr, "unknown urb: ");
+        perror("");
         if (reaped_urb->status == -EILSEQ) {
           /* this is usually a sign of disconnect.. */
           usleep(250000);
@@ -539,10 +658,60 @@ int main(int argc, char *argv[])
       }
 
       if (reaped_urb == &urb[URB_DATA_IN]) {
-        printf("*data*\n");
+        /* some request from teensy */
+        int count;
+        uint8_t b;
+
+        switch (pkt_in.type) {
+        case PKT_STREAM_REQ:
+          printf("%d/%d\n", frames_sent, frame_count);
+
+          for (i = 0; i < sizeof(pkt_out.data); i++) {
+            pkt_out.data[i * 2 + 0] = 0x33;
+            pkt_out.data[i * 2 + 1] = 0x3f;
+          }
+          if (frames_sent < frame_count) {
+            pkt_out.type = PKT_STREAM_DATA;
+
+            count = frame_count - frames_sent;
+            if (count > sizeof(pkt_out.data) / 2)
+              count = sizeof(pkt_out.data) / 2;
+            for (i = 0; i < count; i++) {
+              /* SCBA RLDU */
+              b = gmv->data[frames_sent][0];
+
+              /* ?0SA 00DU, ?1CB RLDU */
+              pkt_out.data[i * 2 + 0] = (b & 0x13) | ((b >> 2) & 0x20);
+              pkt_out.data[i * 2 + 1] = (b & 0x0f) | ((b >> 1) & 0x30);
+
+              if (gmv->data[frames_sent][1] != 0xff
+                  || gmv->data[frames_sent][2] != 0xff)
+              {
+                fprintf(stderr, "f %d: unhandled byte(s) %02x %02x\n",
+                  frames_sent, gmv->data[frames_sent][1],
+                  gmv->data[frames_sent][2]);
+              }
+
+              frames_sent++;
+            }
+          }
+          else
+            pkt_out.type = PKT_STREAM_END;
+
+          ret = submit_urb(dev.fd, &urb[URB_DATA_OUT],
+                  dev.ifaces[0].ep_out, &pkt_out, sizeof(pkt_out));
+          if (ret != 0)
+            perror("USBDEVFS_SUBMITURB URB_DATA_OUT PKT_STREAM_DATA");
+          break;
+
+        default:
+          printf("host: got unknown pkt type: %04x\n", pkt_in.type);
+          break;
+        }
+
         data_in_sent = 0;
       }
-      if (reaped_urb == &urb[URB_DATA_OUT]) {
+      else if (reaped_urb == &urb[URB_DATA_OUT]) {
       }
       else if (reaped_urb == &urb[URB_DBG_IN]) {
         /* debug text */
@@ -551,22 +720,30 @@ int main(int argc, char *argv[])
         dbg_in_sent = 0;
       }
       else {
-        fprintf(stderr, "reaped unknown urb? %p\n", reaped_urb);
+        fprintf(stderr, "reaped unknown urb? %p #%zu\n",
+          reaped_urb, reaped_urb - urb);
       }
     }
 
     /* something to send? */
-    if (fixed_input_changed) {
-      memset(buf_out, 0, sizeof(buf_out));
-      memcpy(buf_out, fixed_input_state, sizeof(fixed_input_state));
+    if (gmv != NULL && !enable_sent) {
+      memset(&pkt_out, 0, sizeof(pkt_out));
+      pkt_out.type = PKT_STREAM_ENABLE;
+      ret = submit_urb(dev.fd, &urb[URB_DATA_OUT], dev.ifaces[0].ep_out,
+                       &pkt_out, sizeof(pkt_out));
+      if (ret != 0) {
+        perror("USBDEVFS_SUBMITURB PKT_STREAM_ENABLE");
+        continue;
+      }
+      enable_sent = 1;
+    }
+    if (gmv == NULL && fixed_input_changed) {
+      memset(&pkt_out, 0, sizeof(pkt_out));
+      pkt_out.type = PKT_FIXED_STATE;
+      memcpy(pkt_out.data, fixed_input_state, sizeof(fixed_input_state));
 
-      memset(&urb[URB_DATA_OUT], 0, sizeof(urb[URB_DATA_OUT]));
-      urb[URB_DATA_OUT].type = USBDEVFS_URB_TYPE_INTERRUPT;
-      urb[URB_DATA_OUT].endpoint = dev.ifaces[0].ep_out;
-      urb[URB_DATA_OUT].buffer = buf_out;
-      urb[URB_DATA_OUT].buffer_length = sizeof(buf_out);
-
-      ret = ioctl(dev.fd, USBDEVFS_SUBMITURB, &urb[URB_DATA_OUT]);
+      ret = submit_urb(dev.fd, &urb[URB_DATA_OUT], dev.ifaces[0].ep_out,
+                       &pkt_out, sizeof(pkt_out));
       if (ret != 0) {
         perror("USBDEVFS_SUBMITURB URB_DATA_OUT");
         break;
