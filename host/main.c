@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -423,9 +424,14 @@ enum my_urbs {
   URB_CNT
 };
 
+static void missing_arg(int a)
+{
+  fprintf(stderr, "missing arg: %d\n", a);
+  exit(1);
+}
+
 int main(int argc, char *argv[])
 {
-  const char *tasfn = NULL;
   struct teensy_dev dev;
   struct usbdevfs_urb urb[URB_CNT];
   struct usbdevfs_urb *reaped_urb;
@@ -438,6 +444,8 @@ int main(int argc, char *argv[])
   int data_in_sent = 0;
   fd_set rfds, wfds;
   struct gmv_tas *gmv = NULL;
+  const char *tasfn = NULL;
+  int tas_skip = 0;
   int enable_sent = 0;
   int frame_count = 0;
   int frames_sent = 0;
@@ -451,17 +459,23 @@ int main(int argc, char *argv[])
 
   for (i = 1; i < argc; i++) {
     if (argv[i][0] == '-') {
-      if (strcmp(argv[i], "-m") != 0) {
+      switch (argv[i][1] | (argv[i][2] << 8)) {
+      case 'm':
+        i++;
+        if (argv[i] == NULL)
+          missing_arg(i);
+        tasfn = argv[i];
+        continue;
+      case 's':
+        i++;
+        if (argv[i] == NULL)
+          missing_arg(i);
+        tas_skip = atoi(argv[i]);
+        continue;
+      default:
         fprintf(stderr, "bad arg: %s\n", argv[i]);
         return 1;
       }
-      i++;
-      if (argv[i] == NULL) {
-        fprintf(stderr, "missing arg\n");
-        return 1;
-      }
-      tasfn = argv[i];
-      continue;
     }
     if (evdev_fd_cnt >= ARRAY_SIZE(evdev_fds)) {
       fprintf(stderr, "too many evdevs\n");
@@ -516,7 +530,7 @@ int main(int argc, char *argv[])
       return 1;
     }
     fclose(f);
-    frame_count = (size - sizeof(*gmv)) / 3;
+    frame_count = (size - sizeof(*gmv)) / sizeof(gmv->data[0]);
 
     /* check the GMV.. */
     if (frame_count <= 0 || size != sizeof(*gmv) + frame_count * 3) {
@@ -550,6 +564,30 @@ int main(int argc, char *argv[])
     printf("loaded GMV: %s\n", gmv->name);
     printf("%d frames, %u rerecords\n",
            frame_count, gmv->rerecord_count);
+
+    if (tas_skip != 0) {
+      if (tas_skip >= frame_count || tas_skip <= -frame_count) {
+        printf("skip out of range: %d/%d\n", tas_skip, frame_count);
+        return 1;
+      }
+      if (tas_skip > 0) {
+        frame_count -= tas_skip;
+        memmove(&gmv->data[0], &gmv->data[tas_skip],
+          sizeof(gmv->data[0]) * frame_count);
+      }
+      else {
+        gmv = realloc(gmv, sizeof(*gmv)
+                + (frame_count - tas_skip) * sizeof(gmv->data[0]));
+        if (gmv == NULL) {
+          fprintf(stderr, "OOM?\n");
+          return 1;
+        }
+        memmove(&gmv->data[-tas_skip], &gmv->data[0],
+          sizeof(gmv->data[0]) * frame_count);
+        memset(&gmv->data[0], 0xff, sizeof(gmv->data[0]) * -tas_skip);
+        frame_count -= tas_skip;
+      }
+    }
   }
 
   enable_echo(0);
