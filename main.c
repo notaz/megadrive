@@ -17,6 +17,8 @@ static struct {
 	uint32_t stream_enable:1;
 	uint32_t stream_started:1;
 	uint32_t stream_received:1;
+	uint32_t use_readinc:1;
+	uint32_t frame_cnt;
 	uint32_t edge_cnt;
 	uint32_t i;
 	uint32_t o;
@@ -42,30 +44,72 @@ void yield(void)
 {
 }
 
-static void my_portb_isr(void)
+static void portb_isr_fixed(void)
 {
 	uint32_t isfr, th;
-
-	//printf("irq, GPIOB_PDIR: %08x\n", GPIOB_PDIR);
 
 	isfr = PORTB_ISFR;
 	PORTB_ISFR = isfr;
 	th = (GPIOB_PDIR >> CORE_PIN0_BIT) & 1;
 
-	if (g.stream_started) {
-		GPIOD_PDOR = g.stream[g.o][th];
-		if (th) {
-			g.o = (g.o + 1) & STREAM_BUF_MASK;
-			if (g.o == g.i) {
-				g.stream_started = 0;
-				g.stream_enable = 0;
-			}
-		}
-	}
-	else {
-		GPIOD_PDOR = g.fixed_state[th];
+	GPIOD_PDOR = g.fixed_state[th];
+	g.edge_cnt++;
+}
+
+static void portb_isr_readinc(void)
+{
+	uint32_t isfr, th;
+
+	isfr = PORTB_ISFR;
+	PORTB_ISFR = isfr;
+	th = (GPIOB_PDIR >> CORE_PIN0_BIT) & 1;
+
+	GPIOD_PDOR = g.stream[g.o][th];
+	if (th) {
+		g.o = (g.o + 1) & STREAM_BUF_MASK;
+		if (g.o == g.i)
+			// done
+			attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
+		g.frame_cnt++;
 	}
 	g.edge_cnt++;
+}
+
+static void portb_isr_read(void)
+{
+	uint32_t isfr, th;
+
+	isfr = PORTB_ISFR;
+	PORTB_ISFR = isfr;
+	th = (GPIOB_PDIR >> CORE_PIN0_BIT) & 1;
+
+	GPIOD_PDOR = g.stream[g.o][th];
+	g.edge_cnt++;
+}
+
+static void portc_isr_nop(void)
+{
+	uint32_t isfr;
+
+	isfr = PORTC_ISFR;
+	PORTC_ISFR = isfr;
+}
+
+// /vsync starts at line 235/259 (ntsc/pal), just as vcounter jumps back
+// we care when it comes out (/vsync goes high) after 3 lines at 238/262
+static void portc_isr_frameinc(void)
+{
+	uint32_t isfr;
+
+	isfr = PORTC_ISFR;
+	PORTC_ISFR = isfr;
+
+	g.o = (g.o + 1) & STREAM_BUF_MASK;
+	if (g.o == g.i) {
+		attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
+		attachInterruptVector(IRQ_PORTC, portc_isr_nop);
+	}
+	g.frame_cnt++;
 }
 
 static void udelay(uint32_t us)
@@ -144,7 +188,17 @@ static void do_start_seq(void)
 		return;
 	}
 
+	__disable_irq();
 	g.stream_started = 1;
+	if (g.use_readinc) {
+		attachInterruptVector(IRQ_PORTB, portb_isr_readinc);
+		attachInterruptVector(IRQ_PORTC, portc_isr_nop);
+	}
+	else {
+		attachInterruptVector(IRQ_PORTB, portb_isr_read);
+		attachInterruptVector(IRQ_PORTC, portc_isr_frameinc);
+	}
+	__enable_irq();
 }
 
 static int get_space(void)
@@ -163,14 +217,21 @@ static void do_usb(void *buf)
 		memcpy(g.fixed_state, pkt->data, sizeof(g.fixed_state));
 		break;
 	case PKT_STREAM_ENABLE:
+		__disable_irq();
+		/* wait for start from MD */
 		g.stream_enable = 1;
 		g.stream_started = 0;
 		g.stream_received = 0;
+		g.use_readinc = pkt->start.use_readinc;
 		g.i = g.o = 0;
+		g.frame_cnt = 0;
+		attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
+		attachInterruptVector(IRQ_PORTC, portc_isr_nop);
+		__enable_irq();
 		break;
 	case PKT_STREAM_END:
 		g.stream_received = 1;
-		printf("end of data\n");
+		printf("end of stream\n");
 		break;
 	case PKT_STREAM_DATA:
 		g_i = g.i;
@@ -209,17 +270,20 @@ int main(void)
 
 	printf("starting, rawhid: %d\n", usb_rawhid_available());
 
-	// md pin   th tr tl  r  l  d  u
+	// md pin   th tr tl  r  l  d  u vsync
 	// md bit*   6  5  4  3  2  1  0
-	// t bit   b16 d5 d4 d3 d2 d1 d0
-	// t pin     0 20  6  8  7 14  2
+	// t bit   b16 d5 d4 d3 d2 d1 d0    c6
+	// t pin     0 20  6  8  7 14  2    11
 	// * - note: tl/tr mixed in most docs
 	pinMode(0, INPUT);
-	attachInterrupt(0, my_portb_isr, CHANGE);
-	attachInterruptVector(IRQ_PORTB, my_portb_isr);
+	attachInterrupt(0, portb_isr_fixed, CHANGE);
+	attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
+	pinMode(11, INPUT);
+	attachInterrupt(11, portc_isr_nop, RISING);
+	attachInterruptVector(IRQ_PORTC, portc_isr_nop);
 
-	// NVIC_SET_PRIORITY(104, 0); // portb
-	NVIC_SET_PRIORITY(IRQ_PORTB, 0); // portb
+	NVIC_SET_PRIORITY(IRQ_PORTB, 0);
+	NVIC_SET_PRIORITY(IRQ_PORTC, 16);
 
 	pinMode( 2, OUTPUT);
 	pinMode(14, OUTPUT);
@@ -232,9 +296,11 @@ int main(void)
 	pinMode(13, OUTPUT);
 
 	// CORE_PIN0_PORTSET CORE_PIN0_BITMASK PORTB_PCR16
+	printf("GPIOB PDDR, PDIR: %08x %08x\n", GPIOB_PDIR, GPIOB_PDDR);
 	printf("GPIOC PDDR, PDIR: %08x %08x\n", GPIOC_PDIR, GPIOC_PDDR);
 	printf("GPIOD PDDR, PDIR: %08x %08x\n", GPIOD_PDIR, GPIOD_PDDR);
 	printf("PORTB_PCR16: %08x\n", PORTB_PCR16);
+	printf("PORTC_PCR6:  %08x\n", PORTC_PCR6);
 
 	asm("mrs %0, BASEPRI" : "=r"(ret));
 	printf("BASEPRI: %d\n", ret);
@@ -248,6 +314,8 @@ int main(void)
 		       && get_space() > sizeof(pkt.data) / STREAM_EL_SZ)
 		{
 			pkt.type = PKT_STREAM_REQ;
+			pkt.req.frame = g.frame_cnt;
+
 			ret = usb_rawhid_send(&pkt, 1000);
 			if (ret != sizeof(pkt)) {
 				printf("send STREAM_REQ: %d\n", ret);

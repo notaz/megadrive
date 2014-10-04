@@ -445,6 +445,7 @@ int main(int argc, char *argv[])
   fd_set rfds, wfds;
   struct gmv_tas *gmv = NULL;
   const char *tasfn = NULL;
+  int use_readinc = 0; // frame increment on read
   int tas_skip = 0;
   int enable_sent = 0;
   int frame_count = 0;
@@ -471,6 +472,9 @@ int main(int argc, char *argv[])
         if (argv[i] == NULL)
           missing_arg(i);
         tas_skip = atoi(argv[i]);
+        continue;
+      case 'r':
+        use_readinc = 1;
         continue;
       default:
         fprintf(stderr, "bad arg: %s\n", argv[i]);
@@ -702,7 +706,8 @@ int main(int argc, char *argv[])
 
         switch (pkt_in.type) {
         case PKT_STREAM_REQ:
-          printf("%d/%d\n", frames_sent, frame_count);
+          printf("%d/%d/%d\n", pkt_in.req.frame,
+            frames_sent, frame_count);
 
           for (i = 0; i < sizeof(pkt_out.data); i++) {
             pkt_out.data[i * 2 + 0] = 0x33;
@@ -767,6 +772,8 @@ int main(int argc, char *argv[])
     if (gmv != NULL && !enable_sent) {
       memset(&pkt_out, 0, sizeof(pkt_out));
       pkt_out.type = PKT_STREAM_ENABLE;
+      pkt_out.start.use_readinc = use_readinc;
+
       ret = submit_urb(dev.fd, &urb[URB_DATA_OUT], dev.ifaces[0].ep_out,
                        &pkt_out, sizeof(pkt_out));
       if (ret != 0) {
