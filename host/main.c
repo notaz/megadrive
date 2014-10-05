@@ -405,6 +405,157 @@ struct gmv_tas {
   uint8_t data[0][3];
 };
 
+static uint8_t *import_gmv(FILE *f, long size, int *frame_count)
+{
+  struct gmv_tas *gmv;
+  uint8_t *out;
+  int ret;
+  int i;
+
+  if (size < (long)sizeof(*gmv)) {
+    fprintf(stderr, "bad gmv size: %ld\n", size);
+    return NULL;
+  }
+
+  gmv = malloc(size);
+  if (gmv == NULL) {
+    fprintf(stderr, "OOM?\n");
+    return NULL;
+  }
+  ret = fread(gmv, 1, size, f);
+  if (ret != size) {
+    fprintf(stderr, "fread %d/%ld: ", ret, size);
+    perror("");
+    return NULL;
+  }
+
+  *frame_count = (size - sizeof(*gmv)) / sizeof(gmv->data[0]);
+
+  /* check the GMV.. */
+  if (*frame_count <= 0 || size != sizeof(*gmv) + *frame_count * 3) {
+    fprintf(stderr, "broken gmv? frames=%d\n", *frame_count);
+    return NULL;
+  }
+
+  if (strncmp(gmv->sig, "Gens Movie TEST", 15) != 0) {
+    fprintf(stderr, "bad GMV sig\n");
+    return NULL;
+  }
+  if (gmv->ctrl1 != '3') {
+    fprintf(stderr, "unhandled controlled config: '%c'\n", gmv->ctrl1);
+    //return NULL;
+  }
+  if (gmv->ver >= 'A') {
+    if (gmv->flags & 0x40) {
+      fprintf(stderr, "unhandled flag: movie requires a savestate\n");
+      return NULL;
+    }
+    if (gmv->flags & 0x20) {
+      fprintf(stderr, "unhandled flag: 3-player movie\n");
+      return NULL;
+    }
+    if (gmv->flags & ~0x80) {
+      //fprintf(stderr, "unhandled flag(s): %04x\n", gmv->flags);
+      //return 1;
+    }
+  }
+  gmv->name[39] = 0;
+  printf("loaded GMV: %s\n", gmv->name);
+  printf("%d frames, %u rerecords\n",
+         *frame_count, gmv->rerecord_count);
+
+  out = malloc(*frame_count * sizeof(out[0]));
+  if (out == NULL) {
+    fprintf(stderr, "OOM?\n");
+    return NULL;
+  }
+
+  for (i = 0; i < *frame_count; i++) {
+    out[i] = gmv->data[i][0];
+
+    if (gmv->data[i][1] != 0xff || gmv->data[i][2] != 0xff)
+    {
+      fprintf(stderr, "f %d: unhandled byte(s) %02x %02x\n",
+        i, gmv->data[i][1], gmv->data[i][2]);
+    }
+  }
+
+  return out;
+}
+
+static int do_bkm_char(char c, char expect, uint8_t *val, int bit)
+{
+  if (c == expect) {
+    *val &= ~(1 << bit);
+    return 0;
+  }
+  if (c == '.')
+    return 0;
+
+  fprintf(stderr, "unexpected bkm char: '%c' instead of '%c'\n",
+          c, expect);
+  return 1;
+}
+
+static uint8_t *import_bkm(FILE *f, int *frame_count)
+{
+  uint8_t *out = NULL, val;
+  int count = 0;
+  int alloc = 0;
+  int line = 0;
+  char buf[256];
+  const char *r;
+  char *p;
+  int i;
+
+  while ((p = fgets(buf, sizeof(buf), f)) != NULL) {
+    line++;
+    if (p[0] != '|')
+      continue;
+
+    if (strlen(p) < 30)
+      goto unhandled_line;
+    if (p[30] != '\r' && p[30] != '\n')
+      goto unhandled_line;
+    p[30] = 0;
+
+    if (count >= alloc) {
+      alloc = alloc * 2 + 64;
+      out = realloc(out, alloc * sizeof(out[0]));
+      if (out == NULL) {
+        fprintf(stderr, "OOM?\n");
+        return NULL;
+      }
+    }
+
+    val = 0xff;
+
+    if (strncmp(p, "|.|", 3) != 0)
+      goto unhandled_line;
+    p += 3;
+
+    const char ref[] = "UDLRABCS";
+    for (r = ref, i = 0; *r != 0; p++, r++, i++) {
+      if (do_bkm_char(*p, *r, &val, i))
+        goto unhandled_line;
+    }
+
+    if (strcmp(p, "....|............||") != 0)
+      goto unhandled_line;
+
+    out[count++] = val;
+    continue;
+
+unhandled_line:
+    fprintf(stderr, "unhandled bkm line %d: '%s'\n", line, buf);
+    return NULL;
+  }
+
+  printf("loaded bkm, %d frames\n", count);
+  *frame_count = count;
+  return out;
+}
+
 static int submit_urb(int fd, struct usbdevfs_urb *urb, int ep,
   void *buf, size_t buf_size)
 {
@@ -443,8 +594,8 @@ int main(int argc, char *argv[])
   int dbg_in_sent = 0;
   int data_in_sent = 0;
   fd_set rfds, wfds;
-  struct gmv_tas *gmv = NULL;
   const char *tasfn = NULL;
+  uint8_t *tas_data = NULL;
   int use_readinc = 0; // frame increment on read
   int tas_skip = 0;
   int enable_sent = 0;
@@ -505,9 +656,10 @@ int main(int argc, char *argv[])
   }
 
   if (tasfn != NULL) {
+    const char *ext;
     long size;
     FILE *f;
-    
+
     f = fopen(tasfn, "rb");
     if (f == NULL) {
       fprintf(stderr, "fopen %s: ", tasfn);
@@ -518,56 +670,31 @@ int main(int argc, char *argv[])
     fseek(f, 0, SEEK_END);
     size = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (size < (long)sizeof(*gmv)) {
-      fprintf(stderr, "bad gmv size: %ld\n", size);
+    if (size <= 0) {
+      fprintf(stderr, "bad size: %ld\n", size);
       return 1;
     }
-    gmv = malloc(size);
-    if (gmv == NULL) {
-      fprintf(stderr, "OOM?\n");
-      return 1;
-    }
-    ret = fread(gmv, 1, size, f);
-    if (ret != size) {
-      fprintf(stderr, "fread %d/%ld: ", ret, size);
-      perror("");
+
+    ext = strrchr(tasfn, '.');
+    if (ext == NULL)
+      ext = tasfn;
+    else
+      ext++;
+
+    if (strcasecmp(ext, "gmv") == 0)
+      tas_data = import_gmv(f, size, &frame_count);
+    else if (strcasecmp(ext, "bkm") == 0)
+      tas_data = import_bkm(f, &frame_count);
+    else {
+      fprintf(stderr, "unknown movie type: '%s'\n", ext);
       return 1;
     }
     fclose(f);
-    frame_count = (size - sizeof(*gmv)) / sizeof(gmv->data[0]);
 
-    /* check the GMV.. */
-    if (frame_count <= 0 || size != sizeof(*gmv) + frame_count * 3) {
-      fprintf(stderr, "broken gmv? frames=%d\n", frame_count);
+    if (tas_data == NULL) {
+      fprintf(stderr, "failed fo parse %s\n", tasfn);
       return 1;
     }
-
-    if (strncmp(gmv->sig, "Gens Movie TEST", 15) != 0) {
-      fprintf(stderr, "bad GMV sig\n");
-      return 1;
-    }
-    if (gmv->ctrl1 != '3') {
-      fprintf(stderr, "unhandled controlled config: '%c'\n", gmv->ctrl1);
-      //return 1;
-    }
-    if (gmv->ver >= 'A') {
-      if (gmv->flags & 0x40) {
-        fprintf(stderr, "unhandled flag: movie requires a savestate\n");
-        return 1;
-      }
-      if (gmv->flags & 0x20) {
-        fprintf(stderr, "unhandled flag: 3-player movie\n");
-        return 1;
-      }
-      if (gmv->flags & ~0x80) {
-        fprintf(stderr, "unhandled flag(s): %04x\n", gmv->flags);
-        //return 1;
-      }
-    }
-    gmv->name[39] = 0;
-    printf("loaded GMV: %s\n", gmv->name);
-    printf("%d frames, %u rerecords\n",
-           frame_count, gmv->rerecord_count);
 
     if (tas_skip != 0) {
       if (tas_skip >= frame_count || tas_skip <= -frame_count) {
@@ -576,19 +703,19 @@ int main(int argc, char *argv[])
       }
       if (tas_skip > 0) {
         frame_count -= tas_skip;
-        memmove(&gmv->data[0], &gmv->data[tas_skip],
-          sizeof(gmv->data[0]) * frame_count);
+        memmove(&tas_data[0], &tas_data[tas_skip],
+          sizeof(tas_data[0]) * frame_count);
       }
       else {
-        gmv = realloc(gmv, sizeof(*gmv)
-                + (frame_count - tas_skip) * sizeof(gmv->data[0]));
-        if (gmv == NULL) {
+        tas_data = realloc(tas_data,
+                     (frame_count - tas_skip) * sizeof(tas_data[0]));
+        if (tas_data == NULL) {
           fprintf(stderr, "OOM?\n");
           return 1;
         }
-        memmove(&gmv->data[-tas_skip], &gmv->data[0],
-          sizeof(gmv->data[0]) * frame_count);
-        memset(&gmv->data[0], 0xff, sizeof(gmv->data[0]) * -tas_skip);
+        memmove(&tas_data[-tas_skip], &tas_data[0],
+          sizeof(tas_data[0]) * frame_count);
+        memset(&tas_data[0], 0xff, sizeof(tas_data[0]) * -tas_skip);
         frame_count -= tas_skip;
       }
     }
@@ -721,20 +848,11 @@ int main(int argc, char *argv[])
               count = sizeof(pkt_out.data) / 2;
             for (i = 0; i < count; i++) {
               /* SCBA RLDU */
-              b = gmv->data[frames_sent][0];
+              b = tas_data[frames_sent];
 
               /* ?0SA 00DU, ?1CB RLDU */
               pkt_out.data[i * 2 + 0] = (b & 0x13) | ((b >> 2) & 0x20);
               pkt_out.data[i * 2 + 1] = (b & 0x0f) | ((b >> 1) & 0x30);
-
-              if (gmv->data[frames_sent][1] != 0xff
-                  || gmv->data[frames_sent][2] != 0xff)
-              {
-                fprintf(stderr, "f %d: unhandled byte(s) %02x %02x\n",
-                  frames_sent, gmv->data[frames_sent][1],
-                  gmv->data[frames_sent][2]);
-              }
-
               frames_sent++;
             }
           }
@@ -769,7 +887,7 @@ int main(int argc, char *argv[])
     }
 
     /* something to send? */
-    if (gmv != NULL && !enable_sent) {
+    if (tas_data != NULL && !enable_sent) {
       memset(&pkt_out, 0, sizeof(pkt_out));
       pkt_out.type = PKT_STREAM_ENABLE;
       pkt_out.start.use_readinc = use_readinc;
@@ -782,7 +900,7 @@ int main(int argc, char *argv[])
       }
       enable_sent = 1;
     }
-    if (gmv == NULL && fixed_input_changed) {
+    if (tas_data == NULL && fixed_input_changed) {
       memset(&pkt_out, 0, sizeof(pkt_out));
       pkt_out.type = PKT_FIXED_STATE;
       memcpy(pkt_out.data, fixed_input_state, sizeof(fixed_input_state));
