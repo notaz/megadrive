@@ -280,11 +280,12 @@ out:
   return retval;
 }
 
+static int g_exit;
+
 static void signal_handler(int sig)
 {
-  enable_echo(1);
+  g_exit = 1;
   signal(sig, SIG_DFL);
-  raise(sig);
 }
 
 /* ?0SA 00DU, ?1CB RLDU */
@@ -593,8 +594,7 @@ int main(int argc, char *argv[])
   int evdev_fd_cnt = 0;
   int evdev_support;
   int wait_device = 0;
-  int dbg_in_sent = 0;
-  int data_in_sent = 0;
+  int pending_urbs = 0;
   fd_set rfds, wfds;
   const char *tasfn = NULL;
   uint8_t *tas_data = NULL;
@@ -608,7 +608,7 @@ int main(int argc, char *argv[])
   struct tas_pkt pkt_out;
   struct timeval *timeout = NULL;
   struct timeval tout;
-  int i, ret;
+  int i, ret = -1;
   int fd;
 
   for (i = 1; i < argc; i++) {
@@ -728,7 +728,7 @@ int main(int argc, char *argv[])
 
   dev.fd = -1;
 
-  while (1)
+  while (!g_exit)
   {
     if (dev.fd == -1) {
       ret = find_device(&dev, 0x16C0, 0x0486);
@@ -745,8 +745,7 @@ int main(int argc, char *argv[])
       }
 
       wait_device = 0;
-      data_in_sent = 0;
-      dbg_in_sent = 0;
+      pending_urbs = 0;
       enable_sent = 0;
       frames_sent = 0;
 
@@ -757,7 +756,7 @@ int main(int argc, char *argv[])
       timeout = &tout;
     }
 
-    if (!data_in_sent) {
+    if (!(pending_urbs & (1 << URB_DATA_IN))) {
       memset(&pkt_in, 0, sizeof(pkt_in));
       ret = submit_urb(dev.fd, &urb[URB_DATA_IN], dev.ifaces[0].ep_in,
                        &pkt_in, sizeof(pkt_in));
@@ -766,9 +765,9 @@ int main(int argc, char *argv[])
         break;
       }
 
-      data_in_sent = 1;
+      pending_urbs |= 1 << URB_DATA_IN;
     }
-    if (!dbg_in_sent) {
+    if (!(pending_urbs & (1 << URB_DBG_IN))) {
       ret = submit_urb(dev.fd, &urb[URB_DBG_IN], dev.ifaces[1].ep_in,
                        buf_dbg, sizeof(buf_dbg) - 1);
       if (ret != 0) {
@@ -776,7 +775,7 @@ int main(int argc, char *argv[])
         break;
       }
 
-      dbg_in_sent = 1;
+      pending_urbs |= 1 << URB_DBG_IN;
     }
 
     FD_ZERO(&rfds);
@@ -822,6 +821,8 @@ int main(int argc, char *argv[])
     /* something from USB? */
     if (FD_ISSET(dev.fd, &wfds))
     {
+      unsigned int which_urb;
+
       reaped_urb = NULL;
       ret = ioctl(dev.fd, USBDEVFS_REAPURB, &reaped_urb);
       if (ret != 0) {
@@ -830,13 +831,17 @@ int main(int argc, char *argv[])
         perror("USBDEVFS_REAPURB");
         break;
       }
+      which_urb = reaped_urb - urb;
+      if (which_urb < ARRAY_SIZE(urb))
+        pending_urbs &= ~(1 << which_urb);
+      else {
+        fprintf(stderr, "reaped unknown urb: %p #%u",
+                reaped_urb, which_urb);
+      }
 
       if (reaped_urb != NULL && reaped_urb->status != 0) {
         errno = -reaped_urb->status;
-        if ((unsigned long)(reaped_urb - urb) < ARRAY_SIZE(urb))
-          fprintf(stderr, "urb #%zu: ", reaped_urb - urb);
-        else
-          fprintf(stderr, "unknown urb: ");
+        fprintf(stderr, "urb #%u: ", which_urb);
         perror("");
         if (reaped_urb->status == -EILSEQ) {
           /* this is usually a sign of disconnect.. */
@@ -844,18 +849,18 @@ int main(int argc, char *argv[])
           goto dev_close;
         }
       }
-
-      if (reaped_urb == &urb[URB_DATA_IN]) {
+      else if (reaped_urb == &urb[URB_DATA_IN])
+      {
         /* some request from teensy */
         int count;
         uint8_t b;
 
         switch (pkt_in.type) {
         case PKT_STREAM_REQ:
-          printf("%d/%d/%d\n", pkt_in.req.frame,
+          printf("req: %d/%d/%d\n", pkt_in.req.frame,
             frames_sent, frame_count);
 
-          for (i = 0; i < sizeof(pkt_out.data); i++) {
+          for (i = 0; i < sizeof(pkt_out.data) / 2; i++) {
             pkt_out.data[i * 2 + 0] = 0x33;
             pkt_out.data[i * 2 + 1] = 0x3f;
           }
@@ -888,16 +893,15 @@ int main(int argc, char *argv[])
           printf("host: got unknown pkt type: %04x\n", pkt_in.type);
           break;
         }
-
-        data_in_sent = 0;
       }
-      else if (reaped_urb == &urb[URB_DATA_OUT]) {
+      else if (reaped_urb == &urb[URB_DATA_OUT])
+      {
       }
-      else if (reaped_urb == &urb[URB_DBG_IN]) {
+      else if (reaped_urb == &urb[URB_DBG_IN])
+      {
         /* debug text */
         buf_dbg[reaped_urb->actual_length] = 0;
         printf("%s", buf_dbg);
-        dbg_in_sent = 0;
       }
       else {
         fprintf(stderr, "reaped unknown urb? %p #%zu\n",
@@ -906,6 +910,10 @@ int main(int argc, char *argv[])
     }
 
     /* something to send? */
+    if (pending_urbs & (1 << URB_DATA_OUT))
+      // can't do that yet
+      continue;
+
     if (tas_data != NULL && !enable_sent) {
       memset(&pkt_out, 0, sizeof(pkt_out));
       pkt_out.type = PKT_STREAM_ENABLE;
@@ -931,6 +939,8 @@ int main(int argc, char *argv[])
         perror("USBDEVFS_SUBMITURB URB_DATA_OUT");
         break;
       }
+      pending_urbs |= 1 << URB_DATA_OUT;
+      continue;
     }
 
     continue;
@@ -941,6 +951,23 @@ dev_close:
   }
 
   enable_echo(1);
+
+  if (dev.fd != -1) {
+    /* deal with pending URBs */
+    if (pending_urbs & (1 << URB_DATA_IN))
+      ioctl(dev.fd, USBDEVFS_DISCARDURB, &urb[URB_DATA_IN]);
+    if (pending_urbs & (1 << URB_DBG_IN))
+      ioctl(dev.fd, USBDEVFS_DISCARDURB, &urb[URB_DBG_IN]);
+    for (i = 0; i < URB_CNT; i++) {
+      if (pending_urbs & (1 << i)) {
+        ret = ioctl(dev.fd, USBDEVFS_REAPURB, &reaped_urb);
+        if (ret != 0)
+          perror("USBDEVFS_REAPURB");
+      }
+    }
+
+    close(dev.fd);
+  }
 
   return ret;
 }
