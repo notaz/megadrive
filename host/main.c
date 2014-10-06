@@ -261,9 +261,11 @@ static int enable_echo(int enable)
 
   // printf("lflag: 0%o\n", tty.c_lflag);
   if (enable)
-    tty.c_lflag |= ECHO;
-  else
-    tty.c_lflag &= ~ECHO;
+    tty.c_lflag |= ECHO | ICANON;
+  else {
+    tty.c_lflag &= ~(ECHO | ICANON);
+    tty.c_cc[VMIN] = tty.c_cc[VTIME] = 0;
+  }
 
   ret = tcsetattr(fd, TCSANOW, &tty);
   if (ret != 0) {
@@ -778,6 +780,7 @@ int main(int argc, char *argv[])
     }
 
     FD_ZERO(&rfds);
+    FD_SET(STDIN_FILENO, &rfds);
     for (i = 0; i < evdev_fd_cnt; i++)
       FD_SET(evdev_fds[i], &rfds);
 
@@ -791,7 +794,23 @@ int main(int argc, char *argv[])
     }
     timeout = NULL;
 
+    /* sometihng form stdin? */
     /* something from input devices? */
+    if (FD_ISSET(STDIN_FILENO, &rfds)) {
+      char c = 0;
+      ret = read(STDIN_FILENO, &c, 1);
+      if (ret <= 0) {
+        perror("read stdin");
+        break;
+      }
+
+      switch (c) {
+      case 'r':
+        enable_sent = 0;
+        break;
+      }
+    }
+
     fixed_input_changed = 0;
     for (i = 0; i < evdev_fd_cnt; i++) {
       if (FD_ISSET(evdev_fds[i], &rfds)) {
@@ -899,6 +918,7 @@ int main(int argc, char *argv[])
         continue;
       }
       enable_sent = 1;
+      frames_sent = 0;
     }
     if (tas_data == NULL && fixed_input_changed) {
       memset(&pkt_out, 0, sizeof(pkt_out));
