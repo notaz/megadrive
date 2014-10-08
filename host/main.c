@@ -559,6 +559,44 @@ unhandled_line:
   return out;
 }
 
+static int write_bkm_frame(FILE *f, const uint8_t *data)
+{
+  /* ?0SA 00DU, ?1CB RLDU */
+  static const char ref[]  = "UDLRABCSXYZM";
+  static const char bits[] = { 0,1,2,3, 12,4,5,13, 16,16,16,16 };
+  uint32_t idata[2];
+  int p, i;
+
+  if (f == NULL) {
+    fprintf(stderr, "%s called without outfile\n", __func__);
+    goto out;
+  }
+
+  idata[0] = 0x10000 | (data[0] << 8) | data[1];
+  idata[1] = ~0;
+
+  fprintf(f, "|.|");
+  for (p = 0; p < 2; p++) {
+    for (i = 0; i < 12; i++)
+      fprintf(f, "%c", (idata[p] & (1 << bits[i])) ? '.' : ref[i]);
+    fprintf(f, "|");
+  }
+  fprintf(f, "|\n");
+
+out:
+  return 2;
+}
+
+static int tas_data_to_teensy(uint8_t b, uint8_t *data)
+{
+  /* SCBA RLDU */
+  /*     v     */
+  /* ?0SA 00DU, ?1CB RLDU */
+  data[0] = (b & 0x13) | ((b >> 2) & 0x20);
+  data[1] = (b & 0x0f) | ((b >> 1) & 0x30);
+  return 2;
+}
+
 static int submit_urb(int fd, struct usbdevfs_urb *urb, int ep,
   void *buf, size_t buf_size)
 {
@@ -597,10 +635,12 @@ int main(int argc, char *argv[])
   int pending_urbs = 0;
   fd_set rfds, wfds;
   const char *tasfn = NULL;
+  const char *outfn = NULL;
   uint8_t *tas_data = NULL;
   int use_readinc = 0; // frame increment on read
   int tas_skip = 0;
   int enable_sent = 0;
+  int abort_sent = 0;
   int frame_count = 0;
   int frames_sent = 0;
   char buf_dbg[64 + 1];
@@ -608,6 +648,7 @@ int main(int argc, char *argv[])
   struct tas_pkt pkt_out;
   struct timeval *timeout = NULL;
   struct timeval tout;
+  FILE *outf = NULL;
   int i, ret = -1;
   int fd;
 
@@ -619,6 +660,12 @@ int main(int argc, char *argv[])
         if (argv[i] == NULL)
           missing_arg(i);
         tasfn = argv[i];
+        continue;
+      case 'w':
+        i++;
+        if (argv[i] == NULL)
+          missing_arg(i);
+        outfn = argv[i];
         continue;
       case 's':
         i++;
@@ -634,6 +681,8 @@ int main(int argc, char *argv[])
         return 1;
       }
     }
+
+    /* remaining args are evdev filenames */
     if (evdev_fd_cnt >= ARRAY_SIZE(evdev_fds)) {
       fprintf(stderr, "too many evdevs\n");
       break;
@@ -723,12 +772,21 @@ int main(int argc, char *argv[])
     }
   }
 
+  if (outfn != NULL) {
+    outf = fopen(outfn, "w");
+    if (outf == NULL) {
+      fprintf(stderr, "fopen %s: ", tasfn);
+      perror("");
+      return 1;
+    }
+  }
+
   enable_echo(0);
   signal(SIGINT, signal_handler);
 
   dev.fd = -1;
 
-  while (!g_exit)
+  while (!g_exit || (pending_urbs & (1 << URB_DATA_OUT)))
   {
     if (dev.fd == -1) {
       ret = find_device(&dev, 0x16C0, 0x0486);
@@ -794,7 +852,6 @@ int main(int argc, char *argv[])
     timeout = NULL;
 
     /* sometihng form stdin? */
-    /* something from input devices? */
     if (FD_ISSET(STDIN_FILENO, &rfds)) {
       char c = 0;
       ret = read(STDIN_FILENO, &c, 1);
@@ -810,6 +867,7 @@ int main(int argc, char *argv[])
       }
     }
 
+    /* something from input devices? */
     fixed_input_changed = 0;
     for (i = 0; i < evdev_fd_cnt; i++) {
       if (FD_ISSET(evdev_fds[i], &rfds)) {
@@ -852,33 +910,24 @@ int main(int argc, char *argv[])
       else if (reaped_urb == &urb[URB_DATA_IN])
       {
         /* some request from teensy */
-        int count;
-        uint8_t b;
-
         switch (pkt_in.type) {
         case PKT_STREAM_REQ:
           printf("req: %d/%d/%d\n", pkt_in.req.frame,
             frames_sent, frame_count);
 
-          for (i = 0; i < sizeof(pkt_out.data) / 2; i++) {
-            pkt_out.data[i * 2 + 0] = 0x33;
-            pkt_out.data[i * 2 + 1] = 0x3f;
-          }
+          pkt_out.size = 0;
           if (frames_sent < frame_count) {
-            pkt_out.type = PKT_STREAM_DATA;
+            pkt_out.type = PKT_STREAM_DATA_TO;
 
-            count = frame_count - frames_sent;
-            if (count > sizeof(pkt_out.data) / 2)
-              count = sizeof(pkt_out.data) / 2;
-            for (i = 0; i < count; i++) {
-              /* SCBA RLDU */
-              b = tas_data[frames_sent];
+            for (i = 0; i < sizeof(pkt_out.data); ) {
+              i += tas_data_to_teensy(tas_data[frames_sent],
+                     pkt_out.data + i);
 
-              /* ?0SA 00DU, ?1CB RLDU */
-              pkt_out.data[i * 2 + 0] = (b & 0x13) | ((b >> 2) & 0x20);
-              pkt_out.data[i * 2 + 1] = (b & 0x0f) | ((b >> 1) & 0x30);
               frames_sent++;
+              if (frames_sent >= frame_count)
+                break;
             }
+            pkt_out.size = i;
           }
           else
             pkt_out.type = PKT_STREAM_END;
@@ -886,7 +935,19 @@ int main(int argc, char *argv[])
           ret = submit_urb(dev.fd, &urb[URB_DATA_OUT],
                   dev.ifaces[0].ep_out, &pkt_out, sizeof(pkt_out));
           if (ret != 0)
-            perror("USBDEVFS_SUBMITURB URB_DATA_OUT PKT_STREAM_DATA");
+            perror("USBDEVFS_SUBMITURB PKT_STREAM_DATA_TO");
+          break;
+
+        case PKT_STREAM_DATA_FROM:
+          printf("f: %d\n", frame_count);
+          if (pkt_in.size == 0 || pkt_in.size > sizeof(pkt_out.data)) {
+            printf("host: got bad DATA_FROM size: %u\n", pkt_in.size);
+            break;
+          }
+          for (i = 0; i < pkt_in.size; ) {
+            i += write_bkm_frame(outf, pkt_in.data + i);
+            frame_count++;
+          }
           break;
 
         default:
@@ -914,10 +975,12 @@ int main(int argc, char *argv[])
       // can't do that yet
       continue;
 
-    if (tas_data != NULL && !enable_sent) {
+    if ((tas_data != NULL || outf != NULL) && !enable_sent) {
       memset(&pkt_out, 0, sizeof(pkt_out));
       pkt_out.type = PKT_STREAM_ENABLE;
-      pkt_out.start.use_readinc = use_readinc;
+      pkt_out.enable.stream_to = (tas_data != NULL);
+      pkt_out.enable.stream_from = (outf != NULL);
+      pkt_out.enable.use_readinc = use_readinc;
 
       ret = submit_urb(dev.fd, &urb[URB_DATA_OUT], dev.ifaces[0].ep_out,
                        &pkt_out, sizeof(pkt_out));
@@ -925,8 +988,10 @@ int main(int argc, char *argv[])
         perror("USBDEVFS_SUBMITURB PKT_STREAM_ENABLE");
         continue;
       }
+      pending_urbs |= 1 << URB_DATA_OUT;
       enable_sent = 1;
       frames_sent = 0;
+      continue;
     }
     if (tas_data == NULL && fixed_input_changed) {
       memset(&pkt_out, 0, sizeof(pkt_out));
@@ -936,10 +1001,24 @@ int main(int argc, char *argv[])
       ret = submit_urb(dev.fd, &urb[URB_DATA_OUT], dev.ifaces[0].ep_out,
                        &pkt_out, sizeof(pkt_out));
       if (ret != 0) {
-        perror("USBDEVFS_SUBMITURB URB_DATA_OUT");
+        perror("USBDEVFS_SUBMITURB PKT_FIXED_STATE");
         break;
       }
       pending_urbs |= 1 << URB_DATA_OUT;
+      continue;
+    }
+    if (g_exit && !abort_sent) {
+      memset(&pkt_out, 0, sizeof(pkt_out));
+      pkt_out.type = PKT_STREAM_ABORT;
+
+      ret = submit_urb(dev.fd, &urb[URB_DATA_OUT], dev.ifaces[0].ep_out,
+                       &pkt_out, sizeof(pkt_out));
+      if (ret != 0) {
+        perror("USBDEVFS_SUBMITURB PKT_STREAM_ABORT");
+        break;
+      }
+      pending_urbs |= 1 << URB_DATA_OUT;
+      abort_sent = 1;
       continue;
     }
 
@@ -951,6 +1030,9 @@ dev_close:
   }
 
   enable_echo(1);
+
+  if (outf != NULL)
+    fclose(outf);
 
   if (dev.fd != -1) {
     /* deal with pending URBs */

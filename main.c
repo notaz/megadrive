@@ -6,25 +6,34 @@
 #include "teensy3/usb_rawhid.h"
 #include "pkts.h"
 
+#define noinline __attribute__((noinline))
+
 // use power of 2
 #define STREAM_BUF_SIZE 512
 #define STREAM_BUF_MASK (512 - 1)
 
 /* ?0SA 00DU, ?1CB RLDU */
+#define STREAM_EL_SZ 2
+
 static struct {
-	uint8_t stream[STREAM_BUF_SIZE][2];
-	uint8_t fixed_state[4];
-	uint32_t stream_enable:1;
+	uint8_t stream_to[STREAM_BUF_SIZE][STREAM_EL_SZ];
+	uint8_t stream_from[STREAM_BUF_SIZE][STREAM_EL_SZ];
+	union {
+		uint8_t fixed_state[4];
+		uint32_t fixed_state32;
+	};
+	uint32_t stream_enable_to:1;
+	uint32_t stream_enable_from:1;
 	uint32_t stream_started:1;
-	uint32_t stream_received:1;
+	uint32_t stream_ended:1;
 	uint32_t use_readinc:1;
 	uint32_t frame_cnt;
 	uint32_t edge_cnt;
-	uint32_t i;
-	uint32_t o;
+	uint32_t t_i;
+	uint32_t t_o;
+	uint32_t f_i;
+	uint32_t f_o;
 } g;
-
-#define STREAM_EL_SZ sizeof(g.stream[0])
 
 ssize_t _write(int fd, const void *buf, size_t nbyte)
 {
@@ -56,7 +65,7 @@ static void portb_isr_fixed(void)
 	g.edge_cnt++;
 }
 
-static void portb_isr_readinc(void)
+static void portb_isr_do_to_inc(void)
 {
 	uint32_t isfr, th;
 
@@ -64,10 +73,10 @@ static void portb_isr_readinc(void)
 	PORTB_ISFR = isfr;
 	th = (GPIOB_PDIR >> CORE_PIN0_BIT) & 1;
 
-	GPIOD_PDOR = g.stream[g.o][th];
+	GPIOD_PDOR = g.stream_to[g.t_o][th];
 	if (th) {
-		g.o = (g.o + 1) & STREAM_BUF_MASK;
-		if (g.o == g.i)
+		g.t_o = (g.t_o + 1) & STREAM_BUF_MASK;
+		if (g.t_o == g.t_i)
 			// done
 			attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
 		g.frame_cnt++;
@@ -75,7 +84,7 @@ static void portb_isr_readinc(void)
 	g.edge_cnt++;
 }
 
-static void portb_isr_read(void)
+static void portb_isr_do_to(void)
 {
 	uint32_t isfr, th;
 
@@ -83,7 +92,7 @@ static void portb_isr_read(void)
 	PORTB_ISFR = isfr;
 	th = (GPIOB_PDIR >> CORE_PIN0_BIT) & 1;
 
-	GPIOD_PDOR = g.stream[g.o][th];
+	GPIOD_PDOR = g.stream_to[g.t_o][th];
 	g.edge_cnt++;
 }
 
@@ -104,11 +113,48 @@ static void portc_isr_frameinc(void)
 	isfr = PORTC_ISFR;
 	PORTC_ISFR = isfr;
 
-	g.o = (g.o + 1) & STREAM_BUF_MASK;
-	if (g.o == g.i) {
+	g.t_o = (g.t_o + 1) & STREAM_BUF_MASK;
+	if (g.t_o == g.t_i) {
 		attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
 		attachInterruptVector(IRQ_PORTC, portc_isr_nop);
 	}
+	g.frame_cnt++;
+}
+
+/* "recording" data */
+static noinline void do_from_step(void)
+{
+	uint32_t s;
+
+	// should hopefully give atomic fixed_state read..
+	s = g.fixed_state32;
+	g.stream_from[g.f_i][0] = s;
+	g.stream_from[g.f_i][1] = s >> 8;
+	g.f_i = (g.f_i + 1) & STREAM_BUF_MASK;
+}
+
+static void portb_isr_fixed_do_from(void)
+{
+	uint32_t isfr, th;
+
+	isfr = PORTB_ISFR;
+	PORTB_ISFR = isfr;
+	th = (GPIOB_PDIR >> CORE_PIN0_BIT) & 1;
+
+	GPIOD_PDOR = g.fixed_state[th];
+	if (th)
+		do_from_step();
+	g.edge_cnt++;
+}
+
+static void portc_isr_frameinc_do_from(void)
+{
+	uint32_t isfr;
+
+	isfr = PORTC_ISFR;
+	PORTC_ISFR = isfr;
+
+	do_from_step();
 	g.frame_cnt++;
 }
 
@@ -178,38 +224,80 @@ static void do_start_seq(void)
 		return;
 	}
 
-	if (!g.stream_enable) {
+	if (!g.stream_enable_to && !g.stream_enable_from) {
 		printf("got start_seq, without enable from USB\n");
 		return;
 	}
 
-	if (g.i == g.o) {
-		printf("got start_seq while buffer is empty\n");
+	if (g.stream_enable_to && g.t_i == g.t_o) {
+		printf("got start_seq while stream_to is empty\n");
+		return;
+	}
+
+	if (g.stream_enable_from && g.f_i != g.f_o) {
+		printf("got start_seq while stream_from is not empty\n");
 		return;
 	}
 
 	__disable_irq();
 	g.stream_started = 1;
-	if (g.use_readinc) {
-		attachInterruptVector(IRQ_PORTB, portb_isr_readinc);
-		attachInterruptVector(IRQ_PORTC, portc_isr_nop);
+	if (g.stream_enable_to) {
+		if (g.use_readinc) {
+			attachInterruptVector(IRQ_PORTB, portb_isr_do_to_inc);
+			attachInterruptVector(IRQ_PORTC, portc_isr_nop);
+		}
+		else {
+			attachInterruptVector(IRQ_PORTB, portb_isr_do_to);
+			attachInterruptVector(IRQ_PORTC, portc_isr_frameinc);
+		}
 	}
-	else {
-		attachInterruptVector(IRQ_PORTB, portb_isr_read);
-		attachInterruptVector(IRQ_PORTC, portc_isr_frameinc);
+	else if (g.stream_enable_from) {
+		if (g.use_readinc) {
+			attachInterruptVector(IRQ_PORTB,
+						portb_isr_fixed_do_from);
+			attachInterruptVector(IRQ_PORTC, portc_isr_nop);
+		}
+		else {
+			attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
+			attachInterruptVector(IRQ_PORTC,
+					      portc_isr_frameinc_do_from);
+		}
+
+		// prep first frame already
+		do_from_step();
 	}
 	__enable_irq();
 }
 
-static int get_space(void)
+// callers must disable IRQs
+static void clear_state(void)
 {
-	return STREAM_BUF_SIZE - ((g.i - g.o) & STREAM_BUF_MASK);
+	g.stream_enable_to = 0;
+	g.stream_enable_from = 0;
+	g.use_readinc = 0;
+	g.stream_started = 0;
+	g.stream_ended = 0;
+	g.t_i = g.t_o = 0;
+	g.f_i = g.f_o = 0;
+	g.frame_cnt = 0;
+	attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
+	attachInterruptVector(IRQ_PORTC, portc_isr_nop);
+}
+
+static int get_space_to(void)
+{
+	return STREAM_BUF_SIZE - ((g.t_i - g.t_o) & STREAM_BUF_MASK);
+}
+
+static int get_used_from(void)
+{
+	return (g.f_i - g.f_o) & STREAM_BUF_MASK;
 }
 
 static void do_usb(void *buf)
 {
 	struct tas_pkt *pkt = buf;
-	uint32_t i, g_i;
+	uint32_t t_i, i;
 	int space;
 
 	switch (pkt->type) {
@@ -218,35 +306,36 @@ static void do_usb(void *buf)
 		break;
 	case PKT_STREAM_ENABLE:
 		__disable_irq();
+		clear_state();
 		/* wait for start from MD */
-		g.stream_enable = 1;
-		g.stream_started = 0;
-		g.stream_received = 0;
-		g.use_readinc = pkt->start.use_readinc;
-		g.i = g.o = 0;
-		g.frame_cnt = 0;
-		attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
-		attachInterruptVector(IRQ_PORTC, portc_isr_nop);
+		g.stream_enable_to = pkt->enable.stream_to;
+		g.stream_enable_from = pkt->enable.stream_from;
+		g.use_readinc = pkt->enable.use_readinc;
+		__enable_irq();
+		break;
+	case PKT_STREAM_ABORT:
+		__disable_irq();
+		clear_state();
 		__enable_irq();
 		break;
 	case PKT_STREAM_END:
-		g.stream_received = 1;
+		g.stream_ended = 1;
 		printf("end of stream\n");
 		break;
-	case PKT_STREAM_DATA:
-		g_i = g.i;
-		space = get_space();
-		if (space <= sizeof(pkt->data) / STREAM_EL_SZ) {
+	case PKT_STREAM_DATA_TO:
+		t_i = g.t_i;
+		space = get_space_to();
+		if (space <= pkt->size / STREAM_EL_SZ) {
 			printf("got data pkt while space=%d\n", space);
 			return;
 		}
-		for (i = 0; i < sizeof(pkt->data) / STREAM_EL_SZ; i++) {
-			memcpy(&g.stream[g_i++],
+		for (i = 0; i < pkt->size / STREAM_EL_SZ; i++) {
+			memcpy(&g.stream_to[t_i++],
 			       pkt->data + i * STREAM_EL_SZ,
 			       STREAM_EL_SZ);
-			g_i &= STREAM_BUF_MASK;
+			t_i &= STREAM_BUF_MASK;
 		}
-		g.i = g_i;
+		g.t_i = t_i;
 		break;
 	default:
 		printf("got unknown pkt type: %04x\n", pkt->type);
@@ -310,8 +399,9 @@ int main(void)
 
 	while (1) {
 		struct tas_pkt pkt;
-		while (g.stream_enable && !g.stream_received
-		       && get_space() > sizeof(pkt.data) / STREAM_EL_SZ)
+
+		while (g.stream_enable_to && !g.stream_ended
+		  && get_space_to() > sizeof(pkt.data) / STREAM_EL_SZ)
 		{
 			pkt.type = PKT_STREAM_REQ;
 			pkt.req.frame = g.frame_cnt;
@@ -327,6 +417,30 @@ int main(void)
 				printf("usb_rawhid_recv/s: %d\n", ret);
 			else
 				do_usb(buf);
+		}
+
+		while (g.stream_enable_from && !g.stream_ended
+		  && get_used_from() >= sizeof(pkt.data) / STREAM_EL_SZ)
+		{
+			uint32_t f_o;
+			int i;
+
+			f_o = g.f_o;
+			for (i = 0; i < sizeof(pkt.data); i += STREAM_EL_SZ) {
+				memcpy(pkt.data + i, &g.stream_from[f_o++],
+					STREAM_EL_SZ);
+				f_o &= STREAM_BUF_MASK;
+			}
+			g.f_o = f_o;
+
+			pkt.type = PKT_STREAM_DATA_FROM;
+			pkt.size = i;
+
+			ret = usb_rawhid_send(&pkt, 1000);
+			if (ret != sizeof(pkt)) {
+				printf("send DATA_FROM: %d\n", ret);
+				break;
+			}
 		}
 
 		if (timeout == 1000) {

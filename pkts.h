@@ -3,7 +3,8 @@ enum tas_pkt_type {
 	PKT_FIXED_STATE      = 0xef01,
 	PKT_STREAM_ENABLE    = 0xef02,
 	PKT_STREAM_REQ       = 0xef03,
-	PKT_STREAM_DATA      = 0xef04,
+	PKT_STREAM_DATA_TO   = 0xef04,
+	PKT_STREAM_DATA_FROM = 0xef05,
 	PKT_STREAM_END       = 0xef06,
 	PKT_STREAM_ABORT     = 0xef07,
 };
