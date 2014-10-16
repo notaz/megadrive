@@ -22,11 +22,16 @@ static struct {
 		uint8_t fixed_state[4];
 		uint32_t fixed_state32;
 	};
+	union {
+		uint8_t pending_state[4];
+		uint32_t pending_state32;
+	};
 	uint32_t stream_enable_to:1;
 	uint32_t stream_enable_from:1;
 	uint32_t stream_started:1;
 	uint32_t stream_ended:1;
 	uint32_t use_readinc:1;
+	uint32_t use_pending:1;
 	uint32_t frame_cnt;
 	uint32_t edge_cnt;
 	uint32_t t_i;
@@ -53,6 +58,7 @@ void yield(void)
 {
 }
 
+/* portb handles TH */
 static void portb_isr_fixed(void)
 {
 	uint32_t isfr, th;
@@ -128,6 +134,7 @@ static noinline void do_from_step(void)
 
 	// should hopefully give atomic fixed_state read..
 	s = g.fixed_state32;
+	g.fixed_state32 = g.pending_state32;
 	g.stream_from[g.f_i][0] = s;
 	g.stream_from[g.f_i][1] = s >> 8;
 	g.f_i = (g.f_i + 1) & STREAM_BUF_MASK;
@@ -252,6 +259,7 @@ static void do_start_seq(void)
 		}
 	}
 	else if (g.stream_enable_from) {
+		g.use_pending = 1;
 		if (g.use_readinc) {
 			attachInterruptVector(IRQ_PORTB,
 						portb_isr_fixed_do_from);
@@ -262,9 +270,6 @@ static void do_start_seq(void)
 			attachInterruptVector(IRQ_PORTC,
 					      portc_isr_frameinc_do_from);
 		}
-
-		// prep first frame already
-		do_from_step();
 	}
 	__enable_irq();
 }
@@ -274,9 +279,10 @@ static void clear_state(void)
 {
 	g.stream_enable_to = 0;
 	g.stream_enable_from = 0;
-	g.use_readinc = 0;
 	g.stream_started = 0;
 	g.stream_ended = 0;
+	g.use_readinc = 0;
+	g.use_pending = 0;
 	g.t_i = g.t_o = 0;
 	g.f_i = g.f_o = 0;
 	g.frame_cnt = 0;
@@ -302,7 +308,11 @@ static void do_usb(void *buf)
 
 	switch (pkt->type) {
 	case PKT_FIXED_STATE:
-		memcpy(g.fixed_state, pkt->data, sizeof(g.fixed_state));
+		memcpy(&i, pkt->data, sizeof(i));
+		if (g.use_pending)
+			g.pending_state32 = i;
+		else
+			g.fixed_state32 = i;
 		break;
 	case PKT_STREAM_ENABLE:
 		__disable_irq();
