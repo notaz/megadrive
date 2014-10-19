@@ -637,7 +637,7 @@ int main(int argc, char *argv[])
   const char *tasfn = NULL;
   const char *outfn = NULL;
   uint8_t *tas_data = NULL;
-  int use_readinc = 0; // frame increment on read
+  int use_vsync = 0; // frame increment on vsync
   int tas_skip = 0;
   int enable_sent = 0;
   int abort_sent = 0;
@@ -673,8 +673,8 @@ int main(int argc, char *argv[])
           missing_arg(i);
         tas_skip = atoi(argv[i]);
         continue;
-      case 'r':
-        use_readinc = 1;
+      case 'v':
+        use_vsync = 1;
         continue;
       default:
         fprintf(stderr, "bad arg: %s\n", argv[i]);
@@ -980,7 +980,7 @@ int main(int argc, char *argv[])
       pkt_out.type = PKT_STREAM_ENABLE;
       pkt_out.enable.stream_to = (tas_data != NULL);
       pkt_out.enable.stream_from = (outf != NULL);
-      pkt_out.enable.use_readinc = use_readinc;
+      pkt_out.enable.use_readinc = !use_vsync;
 
       ret = submit_urb(dev.fd, &urb[URB_DATA_OUT], dev.ifaces[0].ep_out,
                        &pkt_out, sizeof(pkt_out));
