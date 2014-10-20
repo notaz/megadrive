@@ -355,10 +355,11 @@ static void do_usb(void *buf)
 
 int main(void)
 {
+	uint32_t led_time = 0;
+	uint32_t scheck_time = 0;
 	uint32_t edge_cnt_last;
 	uint32_t edge_cnt;
 	uint8_t buf[64];
-	int timeout;
 	int ret;
 
 	delay(1000); // wait for usb..
@@ -404,15 +405,21 @@ int main(void)
 	asm("mrs %0, BASEPRI" : "=r"(ret));
 	printf("BASEPRI: %d\n", ret);
 
-	timeout = 1000;
 	edge_cnt_last = g.edge_cnt;
 
 	while (1) {
 		struct tas_pkt pkt;
+		uint32_t now;
 
 		while (g.stream_enable_to && !g.stream_ended
 		  && get_space_to() > sizeof(pkt.data) / STREAM_EL_SZ)
 		{
+			if (g.t_i == g.t_o && g.frame_cnt != 0) {
+				printf("underflow detected\n");
+				g.stream_enable_to = 0;
+				break;
+			}
+
 			pkt.type = PKT_STREAM_REQ;
 			pkt.req.frame = g.frame_cnt;
 
@@ -453,31 +460,43 @@ int main(void)
 			}
 		}
 
-		if (timeout == 1000) {
+		now = millis();
+
+		// start condition check
+		if (now - scheck_time > 1000) {
 			edge_cnt = g.edge_cnt;
 			//printf("e: %d th: %d\n", edge_cnt - edge_cnt_last,
 			//      (GPIOB_PDIR >> CORE_PIN0_BIT) & 1);
-			if (edge_cnt - edge_cnt_last > 10000) {
+			if ((g.stream_enable_to || g.stream_enable_from)
+			    && !g.stream_started
+			    && edge_cnt - edge_cnt_last > 10000)
+			{
 				do_start_seq();
 				edge_cnt = g.edge_cnt;
 			}
 			edge_cnt_last = edge_cnt;
+			scheck_time = now;
 		}
 
-		ret = usb_rawhid_recv(buf, timeout);
-		if (ret == 64) {
-			CORE_PIN13_PORTSET = CORE_PIN13_BITMASK;
+		// led?
+		if (CORE_PIN13_PORTREG & CORE_PIN13_BITMASK) {
+			if ((int)(now - led_time) > 10)
+				CORE_PIN13_PORTCLEAR = CORE_PIN13_BITMASK;
+		}
 
-			do_usb(buf);
-			timeout = 20;
-		}
-		else if (ret == 0) {
-			CORE_PIN13_PORTCLEAR = CORE_PIN13_BITMASK;
-			timeout = 1000;
-		}
-		else {
-			printf("usb_rawhid_recv: %d\n", ret);
-			timeout = 1000;
+		// something on rawhid?
+		if (usb_rawhid_available() > 0)
+		{
+			ret = usb_rawhid_recv(buf, 20);
+			if (ret == 64) {
+				led_time = millis();
+				CORE_PIN13_PORTSET = CORE_PIN13_BITMASK;
+
+				do_usb(buf);
+			}
+			else {
+				printf("usb_rawhid_recv: %d\n", ret);
+			}
 		}
 	}
 
