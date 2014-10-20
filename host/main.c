@@ -587,13 +587,22 @@ out:
   return 2;
 }
 
-static int tas_data_to_teensy(uint8_t b, uint8_t *data)
+static int tas_data_to_teensy(uint8_t b, uint8_t *data, FILE *logf)
 {
+  uint8_t t;
+
   /* SCBA RLDU */
   /*     v     */
   /* ?0SA 00DU, ?1CB RLDU */
   data[0] = (b & 0x13) | ((b >> 2) & 0x20);
   data[1] = (b & 0x0f) | ((b >> 1) & 0x30);
+
+  if (logf != NULL) {
+    fwrite(&data[0], 1, 1, logf);
+    t = data[1] | 0x40; // expected TH
+    fwrite(&t, 1, 1, logf);
+  }
+
   return 2;
 }
 
@@ -636,6 +645,7 @@ int main(int argc, char *argv[])
   fd_set rfds, wfds;
   const char *tasfn = NULL;
   const char *outfn = NULL;
+  const char *logfn = NULL;
   uint8_t *tas_data = NULL;
   int use_vsync = 0; // frame increment on vsync
   int tas_skip = 0;
@@ -649,6 +659,7 @@ int main(int argc, char *argv[])
   struct timeval *timeout = NULL;
   struct timeval tout;
   FILE *outf = NULL;
+  FILE *logf = NULL;
   int i, ret = -1;
   int fd;
 
@@ -666,6 +677,12 @@ int main(int argc, char *argv[])
         if (argv[i] == NULL)
           missing_arg(i);
         outfn = argv[i];
+        continue;
+      case 'l':
+        i++;
+        if (argv[i] == NULL)
+          missing_arg(i);
+        logfn = argv[i];
         continue;
       case 's':
         i++;
@@ -775,7 +792,16 @@ int main(int argc, char *argv[])
   if (outfn != NULL) {
     outf = fopen(outfn, "w");
     if (outf == NULL) {
-      fprintf(stderr, "fopen %s: ", tasfn);
+      fprintf(stderr, "fopen %s: ", outfn);
+      perror("");
+      return 1;
+    }
+  }
+
+  if (logfn != NULL) {
+    logf = fopen(logfn, "wb");
+    if (logf == NULL) {
+      fprintf(stderr, "fopen %s: ", logfn);
       perror("");
       return 1;
     }
@@ -863,6 +889,8 @@ int main(int argc, char *argv[])
       switch (c) {
       case 'r':
         enable_sent = 0;
+        if (logf != NULL)
+          rewind(logf);
         break;
       }
     }
@@ -921,7 +949,7 @@ int main(int argc, char *argv[])
 
             for (i = 0; i < sizeof(pkt_out.data); ) {
               i += tas_data_to_teensy(tas_data[frames_sent],
-                     pkt_out.data + i);
+                     pkt_out.data + i, logf);
 
               frames_sent++;
               if (frames_sent >= frame_count)
@@ -929,8 +957,11 @@ int main(int argc, char *argv[])
             }
             pkt_out.size = i;
           }
-          else
+          else {
             pkt_out.type = PKT_STREAM_END;
+            if (logf != NULL)
+              fflush(logf);
+          }
 
           ret = submit_urb(dev.fd, &urb[URB_DATA_OUT],
                   dev.ifaces[0].ep_out, &pkt_out, sizeof(pkt_out));
@@ -1033,6 +1064,8 @@ dev_close:
 
   if (outf != NULL)
     fclose(outf);
+  if (logf != NULL)
+    fclose(logf);
 
   if (dev.fd != -1) {
     /* deal with pending URBs */
