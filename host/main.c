@@ -994,6 +994,12 @@ int main(int argc, char *argv[])
         /* debug text */
         buf_dbg[reaped_urb->actual_length] = 0;
         printf("%s", buf_dbg);
+
+        // continue receiving debug before sending out stuff
+        tout.tv_sec = 0;
+        tout.tv_usec = 1000;
+        timeout = &tout;
+        continue;
       }
       else {
         fprintf(stderr, "reaped unknown urb? %p #%zu\n",
