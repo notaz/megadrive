@@ -31,6 +31,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <arpa/inet.h> // hton
 #include <termios.h>
 #include <unistd.h>
 
@@ -73,7 +74,8 @@ static int write_to_cart(int fd, const void *data, size_t size)
 
 	ret = write(fd, data, size);
 	if (ret != size) {
-		perror("write");
+		fprintf(stderr, "write %d/%zd: ", ret, size);
+		perror("");
 		exit(1);
 		//return -1;
 	}
@@ -83,13 +85,19 @@ static int write_to_cart(int fd, const void *data, size_t size)
 
 static int read_from_cart(int fd, void *data, size_t size)
 {
+	size_t got = 0;
 	int ret;
 
-	ret = read(fd, data, size);
-	if (ret != (int)size) {
-		perror("read");
-		exit(1);
-		//return -1;
+	while (got < size) {
+		ret = read(fd, (char *)data + got, size - got);
+		if (ret <= 0) {
+			fprintf(stderr, "read %d %zd/%zd: ",
+				ret, got, size);
+			perror("");
+			exit(1);
+			//return -1;
+		}
+		got += ret;
 	}
 
 	return 0;
@@ -153,9 +161,9 @@ static int send_file(int fd, const char *fname, const char *cmd)
 	int i;
 
 	f = fopen(fname, "rb");
-	if (f == NULL)
-	{
+	if (f == NULL) {
 		fprintf(stderr, "fopen %s: ", fname);
+		perror("");
 		return -1;
 	}
 
@@ -207,6 +215,59 @@ out:
 	return retval;
 }
 
+static int recv_file(int fd, const char *fname, unsigned int addr,
+	unsigned int size)
+{
+	int retval = -1;
+	char *buf = NULL;
+	FILE *f = NULL;
+	struct {
+		unsigned int addr;
+		unsigned int size;
+	} addr_size;
+	int ret;
+
+	f = fopen(fname, "wb");
+	if (f == NULL) {
+		fprintf(stderr, "fopen %s: ", fname);
+		perror("");
+		return -1;
+	}
+
+	buf = malloc(size);
+	if (buf == NULL) {
+		fprintf(stderr, "OOM?\n");
+		goto out;
+	}
+
+	send_cmd(fd, "*xd");
+
+	addr_size.addr = htonl(addr);
+	addr_size.size = htonl(size);
+	ret = write_with_check(fd, &addr_size, sizeof(addr_size), 'k');
+	if (ret)
+		return ret;
+
+	ret = read_from_cart(fd, buf, size);
+	if (ret)
+		goto out;
+
+	ret = fwrite(buf, 1, size, f);
+	if (ret != size) {
+		fprintf(stderr, "fwrite %d/%d: ", ret, size);
+		perror("");
+		goto out;
+	}
+
+	retval = 0;
+out:
+	if (f != NULL)
+		fclose(f);
+	free(buf);
+
+	return retval;
+}
+
 static void usage(const char *argv0)
 {
 	printf("usage:\n"
@@ -220,6 +281,8 @@ static void usage(const char *argv0)
 		"  *r<x> - run SDRAM contents as mapper x:\n"
 		"    s - sms, m - md, o - OS app, c - cd BIOS, M - md10m\n"
 		"upload commands must be followed by -f <file>\n"
+		"custom OS commands:\n"
+		"  *xd <addr> <size> <file> - download memory\n"
 		, argv0);
 	exit(1);
 }
@@ -286,7 +349,21 @@ int main(int argc, char *argv[])
 			pending_cmd = argv[arg];
 			continue;
 		}
+		/* custom OS commands */
+		if (!strcmp(argv[arg], "*xd")) {
+			unsigned int addr, size;
+			if (arg + 3 >= argc)
+				invarg(argc, argv, argc);
+			addr = strtoul(argv[++arg], NULL, 0);
+			size = strtoul(argv[++arg], NULL, 0);
+			ret = recv_file(fd, argv[++arg], addr, size);
+			if (ret)
+				return ret;
 
+			continue;
+		}
+
+		/* passthrough */
 		ret = send_cmd_check_k(fd, argv[arg]);
 	}
 
