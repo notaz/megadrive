@@ -308,13 +308,35 @@ void vbl(void)
 }
 
 static int usb_read_while_ready(OsRoutine *ed,
-    void *buf_, int maxlen)
+    void *buf_, unsigned int maxlen)
 {
     u8 *buf = buf_;
-    int r = 0;
+    unsigned int r = 0;
 
     while (ed->usbRdReady() && r < maxlen)
         buf[r++] = ed->usbReadByte();
+
+    return r;
+}
+
+static int usb_read(OsRoutine *ed, void *buf_, unsigned int maxlen)
+{
+    u8 *buf = buf_;
+    unsigned int r = 0;
+
+    while (r < maxlen)
+        buf[r++] = ed->usbReadByte();
+
+    return r;
+}
+
+static int usb_write(OsRoutine *ed, const void *buf_, unsigned int maxlen)
+{
+    const u8 *buf = buf_;
+    unsigned int r = 0;
+
+    while (r < maxlen)
+        ed->usbWriteByte(buf[r++]);
 
     return r;
 }
@@ -371,6 +393,29 @@ static int do_test(OsRoutine *ed, u8 b3)
         test_joy_latency(&min, &max);
         printf("latency: %d - %d\n\n", min, max);
         return 0;
+    default:
+        break;
+    }
+
+    return -1;
+}
+
+static int do_custom(OsRoutine *ed, u8 b3)
+{
+    struct {
+        unsigned int addr;
+        unsigned int size;
+    } d;
+
+    switch (b3)
+    {
+    case 'd':
+        usb_read(ed, &d, sizeof(d));
+        ed->usbWriteByte('k');
+        printf("sending %i bytes from %06x..\n", d.size, d.addr);
+        usb_write(ed, (void *)d.addr, d.size);
+        printf("done.\n");
+        return 1;
     default:
         break;
     }
@@ -453,8 +498,13 @@ int main()
     for (i = 0; i < PLANE_W * PLANE_H / 2; i++)
         write32(GFX_DATA_PORT, 0);
 
+    /* scroll planes */
+    write32(GFX_CTRL_PORT, GFX_WRITE_VSRAM_ADDR(0));
+    write32(GFX_DATA_PORT, 0);
+
     /* note: relying on ED menu's font setup here.. */
 
+    printf("\n");
     printf("version: %02x, start_hvc: %04x\n",
            read8(0xa10001), start_hvc);
     printf("ED os/fw: %x/%x\n\n", ed->osGetOsVersion(),
@@ -503,6 +553,17 @@ int main()
         case 't':
             buf[2] = ed->usbReadByte();
             ret = do_test(ed, buf[2]);
+            if (ret != 0) {
+                d = 3;
+                goto bad_input;
+            }
+            ed->usbWriteByte('k');
+            break;
+        case 'x':
+            buf[2] = ed->usbReadByte();
+            ret = do_custom(ed, buf[2]);
+            if (ret == 1)
+                break;
             if (ret != 0) {
                 d = 3;
                 goto bad_input;
