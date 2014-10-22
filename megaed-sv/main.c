@@ -389,6 +389,17 @@ static int do_test(OsRoutine *ed, u8 b3)
 
     switch (b3)
     {
+    case '0':
+        printf("reading..\n");
+        test_joy_read_log((void *)0x200000, 0x20000);
+        //test_joy_read_log((void *)0xff0200, 0x0f000);
+        printf("done\n");
+        return 0;
+    case '1':
+        printf("reading w/vsync..\n");
+        test_joy_read_log_vsync((void *)0x200000, 3600 * 2);
+        printf("done\n");
+        return 0;
     case 'j':
         test_joy_latency(&min, &max);
         printf("latency: %d - %d\n\n", min, max);
