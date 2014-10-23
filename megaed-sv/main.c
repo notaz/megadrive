@@ -518,12 +518,16 @@ int main()
     printf("\n");
     printf("version: %02x, start_hvc: %04x\n",
            read8(0xa10001), start_hvc);
-    printf("ED os/fw: %x/%x\n\n", ed->osGetOsVersion(),
+    printf("ED os/fw: %d/%d\n\n", ed->osGetOsVersion(),
            ed->osGetFirmVersion());
 
     for (;;) {
         if (!ed->usbRdReady()) {
-            asm volatile("stop #0x2000");
+            /* note: stop corrupts SDRAM */
+            //asm volatile("stop #0x2000");
+            asm volatile(
+                "move.l #1000/10, %0\n"
+                "0: dbra %0, 0b\n" : "=r" (i) :: "cc");
             continue;
         }
 
