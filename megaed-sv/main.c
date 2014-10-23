@@ -386,19 +386,62 @@ static void test_joy_latency(int *min_out, int *max_out)
 static int do_test(OsRoutine *ed, u8 b3)
 {
     int min = 0, max = 0;
+    int i, t, len, seed;
+    u8 *p, v;
 
     switch (b3)
     {
     case '0':
         printf("reading..\n");
-        test_joy_read_log((void *)0x200000, 0x20000);
-        //test_joy_read_log((void *)0xff0200, 0x0f000);
+        test_joy_read_log((void *)0x200000, 0x20000, 1);
+        //test_joy_read_log((void *)0xff0200, 0x0f000, 1);
         printf("done\n");
         return 0;
     case '1':
         printf("reading w/vsync..\n");
         test_joy_read_log_vsync((void *)0x200000, 3600 * 2);
         printf("done\n");
+        return 0;
+    case '2':
+    case '3':
+        printf("3btn_idle test..\n");
+        p = (void *)0x200000;
+        len = 0x20000;
+        test_joy_read_log(p, len, b3 == '3');
+        for (i = 0; i < len; i++) {
+            static const u8 e[2] = { 0x33, 0x7f };
+            v = e[i & 1];
+            if (p[i] != v)
+                printf("%06x: bad: %02x %02x\n", &p[i], p[i], v);
+        }
+        printf("done\n");
+        return 0;
+    case '4':
+        printf("3btn_idle data test..\n");
+        p = (void *)0x200000;
+        len = 0x20000;
+        for (i = 0; i < len; i++) {
+            static const u8 e[2] = { 0x33, 0x7f };
+            v = e[i & 1];
+            if (p[i] != v)
+                printf("%06x: bad: %02x %02x\n", &p[i], p[i], v);
+        }
+        printf("done\n");
+        return 0;
+    case '5':
+        seed = read8(0xC00009);
+        printf("testing, seed=%02x\n", seed);
+        p = (void *)0x200000;
+        len = 0x100000;
+        test_byte_write(p, len, seed);
+        for (t = 0; t < 2; t++) {
+            for (i = 0; i < len; i++) {
+                v = (u8)(i + seed);
+                if (p[i] != v)
+                    printf("%06x: bad: %02x %02x\n", &p[i], p[i], v);
+            }
+            printf("done (%d)\n", t);
+        }
         return 0;
     case 'j':
         test_joy_latency(&min, &max);

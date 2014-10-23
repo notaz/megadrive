@@ -49,20 +49,13 @@ read_joy_responses:
     rts
 
 
-.global test_joy_read_log /* u8 *dest, int size */
-test_joy_read_log:
-    ldarg       0, 0, a1
-    ldarg       1, 0, d0
-    movem.l     d2-d7, -(sp)
-    movea.l     #0xa10003, a0
-    move.l      d0, d7
-
-.macro joy_read_log_prep
-    move.l      #0x40, d1
-    moveq.l     #0, d0
-    move.b      d1, (6,a0)
-    move.b      d1, (a0)
-
+/* expects:
+ * a0 = #0xa10003
+ * d0 = #0
+ * d1 = #0x40
+ * trashes d2, d3
+ */
+sync_with_teensy:
 0:  /* wait for special code */
     move.b      d1, (a0)
     move.b      (a0), d2
@@ -84,8 +77,11 @@ test_joy_read_log:
 0:  /* wait enough for teensy to setup it's stuff */
     subq.l      #1, d2   /* 8 */
     bgt.s       0b       /* 10 */
-.endm
-.macro nop_
+
+    rts
+
+
+.macro t_nop
     /*
      * when communicating with 3.3V teensy:
      * - no nops: see old value on multiple pins randomly
@@ -96,20 +92,38 @@ test_joy_read_log:
     nop
 .endm
 
-    joy_read_log_prep
+
+.global test_joy_read_log /* u8 *dest, int size, int do_sync */
+test_joy_read_log:
+    ldarg       0, 0, a1
+    ldarg       1, 0, d0
+    ldarg       2, 0, d1
+    movem.l     d2-d7, -(sp)
+    movea.l     #0xa10003, a0
+    move.l      d0, d7
+    move.l      d1, d6
+
+    moveq.l     #0, d0
+    move.l      #0x40, d1
+    move.b      d1, (6,a0)
+    move.b      d1, (a0)
+
+    tst.l       d6
+    beq.s       2f
+    bsr         sync_with_teensy
 
 2:  /* save data */
     move.b      d0, (a0)
-    nop_
+    t_nop
     move.b      (a0), d2
     move.b      d1, (a0)
-    nop_
+    t_nop
     move.b      (a0), d3
     move.b      d0, (a0)
-    nop_
+    t_nop
     move.b      (a0), d4
     move.b      d1, (a0)
-    nop_
+    t_nop
     move.b      (a0), d5
 .if 0
     /* broken on Mega-ED v9?? */
@@ -147,8 +161,12 @@ test_joy_read_log_vsync:
     movea.l     #0xc00005, a2
     move.l      d0, d7
 
-    /* syncs, sets d0=0, d1=0x40 */
-    joy_read_log_prep
+    move.l      #0x40, d1
+    moveq.l     #0, d0
+    move.b      d1, (6,a0)
+    move.b      d1, (a0)
+
+    bsr         sync_with_teensy
 
 2:  /* save data */
     move.b      d0, (a0)
@@ -171,6 +189,48 @@ test_joy_read_log_vsync:
     bgt.s       2b
 
     movem.l     (sp)+, d2-d7/a2
+    rts
+
+
+.global test_byte_write /* u8 *dest, int size, int seed */
+test_byte_write:
+    ldarg       0, 0, a0
+    ldarg       1, 0, d0
+    ldarg       2, 0, d1
+    movem.l     d2-d7, -(sp)
+
+    move.l      a0, a1
+    add.l       d0, a1
+    move.l      d1, d7
+0:
+    move.b      d7, d0
+    addq.b      #1, d7
+    move.b      d7, d1
+    addq.b      #1, d7
+    move.b      d7, d2
+    addq.b      #1, d7
+    move.b      d7, d3
+    addq.b      #1, d7
+    move.b      d7, d4
+    addq.b      #1, d7
+    move.b      d7, d5
+    addq.b      #1, d7
+    move.b      d7, d6
+    addq.b      #1, d7
+
+    move.b      d0, (a0)+
+    move.b      d1, (a0)+
+    move.b      d2, (a0)+
+    move.b      d3, (a0)+
+    move.b      d4, (a0)+
+    move.b      d5, (a0)+
+    move.b      d6, (a0)+
+    move.b      d7, (a0)+
+    addq.b      #1, d7
+    cmp.l       a1, a0
+    blt.s       0b
+
+    movem.l     (sp)+, d2-d7
     rts
 
 
