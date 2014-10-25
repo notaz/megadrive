@@ -611,7 +611,7 @@ void pinMode(uint8_t pin, uint8_t mode)
 
 	if (mode == OUTPUT) {
 		*portModeRegister(pin) = 1;
-		*config = PORT_PCR_SRE | PORT_PCR_DSE | PORT_PCR_MUX(1);
+		*config = /*PORT_PCR_SRE |*/ PORT_PCR_DSE | PORT_PCR_MUX(1);
 	} else {
 		*portModeRegister(pin) = 0;
 		if (mode == INPUT) {
