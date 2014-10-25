@@ -96,6 +96,16 @@ static void portb_isr_fixed(void)
 	g.edge_cnt++;
 }
 
+static noinline void do_to_step(void)
+{
+	g.frame_cnt++;
+
+	g.t_o = (g.t_o + 1) & STREAM_BUF_MASK;
+	if (g.t_o == g.t_i)
+		// done
+		attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
+}
+
 static void portb_isr_do_to_inc(void)
 {
 	uint32_t isfr, th;
@@ -105,14 +115,8 @@ static void portb_isr_do_to_inc(void)
 	th = (GPIOB_PDIR >> CORE_PIN0_BIT) & 1;
 
 	GPIOD_PDOR = g.stream_to[g.t_o][th];
-	if (th) {
-		g.t_o = (g.t_o + 1) & STREAM_BUF_MASK;
-		if (g.t_o == g.t_i)
-			// done
-			attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
-		g.frame_cnt++;
-	}
-	g.edge_cnt++;
+	if (th)
+		do_to_step();
 }
 
 static void portb_isr_do_to(void)
@@ -409,6 +413,7 @@ int main(void)
 
 	NVIC_SET_PRIORITY(IRQ_PORTB, 0);
 	NVIC_SET_PRIORITY(IRQ_PORTC, 16);
+	SCB_SHPR1 = SCB_SHPR2 = SCB_SHPR3 = 0x10101010;
 
 	pinMode( 2, OUTPUT);
 	pinMode(14, OUTPUT);
@@ -426,9 +431,11 @@ int main(void)
 	printf("GPIOD PDDR, PDIR: %08x %08x\n", GPIOD_PDIR, GPIOD_PDDR);
 	printf("PORTB_PCR16: %08x\n", PORTB_PCR16);
 	printf("PORTC_PCR6:  %08x\n", PORTC_PCR6);
+	printf("PORTD_PCR0:  %08x\n", PORTD_PCR0);
 
 	asm("mrs %0, BASEPRI" : "=r"(ret));
-	printf("BASEPRI: %d\n", ret);
+	printf("BASEPRI: %d, SHPR: %08x %08x %08x\n",
+		ret, SCB_SHPR1, SCB_SHPR2, SCB_SHPR3);
 
 	edge_cnt_last = g.edge_cnt;
 
