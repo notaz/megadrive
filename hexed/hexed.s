@@ -149,7 +149,7 @@
 .macro do_dpad bit op val
 	btst.l		#\bit,d0
 	beq		0f
-	\op.l		\val,a6
+	\op  		\val,a6
 	bra		dpad_end
 0:
 .endm
@@ -751,20 +751,20 @@ draw_status_bar:
 	btst.l		#16+4,d0		/* A - scroll modifier */
 	beq		input_noa
 
-	do_dpad		16+0,  sub, #0x0800
-	do_dpad		16+1,  add, #0x0800
-	do_dpad		16+10, sub, #0xd800
-	do_dpad		16+11, add, #0xd800
+	do_dpad		16+0,  sub.l, #0x0800
+	do_dpad		16+1,  add.l, #0x0800
+	do_dpad		16+10, sub.l, #0xd800
+	do_dpad		16+11, add.l, #0xd800
 input_noa:
 	moveq.l		#0,d1
 	move.w		d7,d1
 	lsr.w		#7,d1
 	lsr.w		#7,d1
 
-	do_dpad		0,  subq, #0x0008
-	do_dpad		1,  addq, #0x0008
-	do_dpad		10, sub, d1
-	do_dpad		11, add, d1
+	do_dpad		0,  subq.l, #0x0008
+	do_dpad		1,  addq.l, #0x0008
+	do_dpad		10, sub.l, d1
+	do_dpad		11, add.l, d1
 
 dpad_end:
 	/* update addr */
