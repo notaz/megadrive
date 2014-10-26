@@ -36,6 +36,8 @@ extern u16 start_hvc;
     *((volatile u16 *) (a))
 #define read32(a) \
     *((volatile u32 *) (a))
+#define write8(a, d) \
+    *((volatile u8 *) (a)) = (d)
 #define write16(a, d) \
     *((volatile u16 *) (a)) = (d)
 #define write32(a, d) \
@@ -528,6 +530,25 @@ static int do_run(OsRoutine *ed, u8 b3, int tas_sync)
     return -1;
 }
 
+void setup_z80(void)
+{
+    u8 *mem = (u8 *)0xa00000;
+    int i;
+
+    write8(0xa11100, 1);
+    write8(0xa11200, 1);
+
+    while (read8(0xa11100) & 1)
+        ;
+
+    /* must use byte access */
+    for (i = 0x2000; i > 0; i--)
+        *mem++ = 0;
+
+    /* console starts with reset on, busreq off,
+     * gens starts with busreq on, keep that for gmv.. */
+}
+
 int main()
 {
     OsRoutine *ed;
@@ -537,6 +558,10 @@ int main()
 
     ed = (OsRoutine *) *(u32 *)0x1A0;
     ed->memInitDmaCode(); 
+
+    /* setup VDP */
+    while (read16(GFX_CTRL_PORT) & 2)
+        ;
 
     ed->VDP_setReg(VDP_MODE1, 0x04); 
     ed->VDP_setReg(VDP_MODE2, 0x64); 
@@ -559,10 +584,13 @@ int main()
     /* note: relying on ED menu's font setup here.. */
 
     printf("\n");
-    printf("version: %02x, start_hvc: %04x\n",
-           read8(0xa10001), start_hvc);
+    printf("version: %02x, hvc: %04x %04x, zbus: %d\n",
+           read8(0xa10001), start_hvc, read16(GFX_CTRL_PORT),
+           read8(0xa11100) & 1);
     printf("ED os/fw: %d/%d\n\n", ed->osGetOsVersion(),
            ed->osGetFirmVersion());
+
+    setup_z80();
 
     for (;;) {
         if (!ed->usbRdReady()) {
