@@ -515,7 +515,7 @@ static int do_run(OsRoutine *ed, u8 b3, int tas_sync)
         return -1;
     }
 
-    printf("starting mapper %x..\n", mapper);
+    printf("syncing and starting mapper %x..\n", mapper);
 
     while (read16(GFX_CTRL_PORT) & 2)
         ;
@@ -584,9 +584,8 @@ int main()
     /* note: relying on ED menu's font setup here.. */
 
     printf("\n");
-    printf("version: %02x, hvc: %04x %04x, zbus: %d\n",
-           read8(0xa10001), start_hvc, read16(GFX_CTRL_PORT),
-           read8(0xa11100) & 1);
+    printf("version: %02x, hvc: %04x %04x\n",
+           read8(0xa10001), start_hvc, read16(0xc00008));
     printf("ED os/fw: %d/%d\n\n", ed->osGetOsVersion(),
            ed->osGetFirmVersion());
 

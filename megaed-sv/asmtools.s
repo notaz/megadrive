@@ -246,6 +246,7 @@ run_game:
     moveq.l     #0x00, d0
     move.b      #0x40, d1     /* d2 is tmp */
     move.b      #0xff, d3
+    moveq.l     #0x00, d5     /* progress cnt */
     move.b      d1, (0x09,a6) /* CtrlA */
     move.b      d0, (0x0b,a6) /* CtrlB */
     move.b      d0, (0x0d,a6) /* CtrlC */
@@ -255,9 +256,6 @@ run_game:
     move.b      d3, (0x15,a6) /* TxDataB */
     move.b      d0, (0x1f,a6) /* S-CtrlC */
     move.b      d3, (0x1b,a6) /* TxDataC */
-
-    /* set up for vram write */
-    move.l      #0x40000000, (a3)
 
     move.l      #0xff0000, a1
     move.l      #0x10000/4/4-1, d2
@@ -276,14 +274,24 @@ run_game:
     dbra        d2, 0b
 
     tst.l       d6
-    beq.s       0f
+    beq.s       sync_hvc
 
     movea.l     #0xa10003, a0
     movea.l     d0, a7
     bsr         sync_with_teensy  /* trashes d3 */
     move.l      d0, (-4,a7)
 
-0:
+sync_hvc:
+    /* set up for progress vram write (x,y - tile #) */
+    /* GFX_WRITE_VRAM_ADDR(0xc000 + (x + 64 * y) * 2) */
+    /* d = d5 + '0' - 32 + 0xB000/32 - 128 = d5 + 0x510 */
+    moveq.l #0, d5
+    move.l      #(0x40000003 | ((36 + 64*1) << 17)), (a3)
+    add.w       #0x510, d5
+    move.w      d5, (a5)
+    move.w      #('/'+0x4e0), (a5)
+    move.w      #('6'+0x4e0), (a5)
+
     /* wait for active display */
     moveq.l     #3, d2
 0:
@@ -298,6 +306,35 @@ run_game:
     move.w      d0, (a5)
 .endr
 
+    movea.l     #0xc00008, a1
+    movea.l     #0xc00008, a1
+    btst.b      #7, (0xa10001)
+    bne         sync_hvc_pal
+
+    move.l      (a1), d3
+    cmp.l       #0xff1fff21, d3
+    bne.s       sync_hvc
+    move.l      (a1), d3
+    cmp.l       #0xff2eff2f, d3
+    bne.s       sync_hvc
+    move.l      (a1), d3
+    cmp.l       #0xff3dff3f, d3
+    bne.s       sync_hvc
+    /* move.l      (a1), d3  -> #0xff4cff4e */
+
+    move.w      d0, (-2,a7)
+
+    move.l      (a1), d3
+    cmp.l       #0xff53ff55, d3
+    bne.s       sync_hvc
+    move.l      (a1), d3
+    cmp.l       #0xff62ff63, d3
+    bne.s       sync_hvc
+
+sync_hvc_pal:
+    /* TODO */
+
+0:
     movea.l     d0, a0
     movea.l     #0xA13000, a1
 
