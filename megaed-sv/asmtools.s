@@ -236,7 +236,7 @@ test_byte_write:
 
 .global run_game /* u16 mapper, int tas_sync */
 run_game:
-	move.w		#0x2700, sr
+    move.w      #0x2700, sr
     ldarg       0, 0, d7
     ldarg       1, 0, d6
     movea.l     #0xa10000, a6
@@ -245,8 +245,9 @@ run_game:
     movea.l     #0xc00004, a3
     moveq.l     #0x00, d0
     move.b      #0x40, d1     /* d2 is tmp */
-    move.b      #0xff, d3
+    move.b      #0xff, d3     /* d4 is temp */
     moveq.l     #0x00, d5     /* progress cnt */
+    movea.l     d0, a7
     move.b      d1, (0x09,a6) /* CtrlA */
     move.b      d0, (0x0b,a6) /* CtrlB */
     move.b      d0, (0x0d,a6) /* CtrlC */
@@ -256,6 +257,8 @@ run_game:
     move.b      d3, (0x15,a6) /* TxDataB */
     move.b      d0, (0x1f,a6) /* S-CtrlC */
     move.b      d3, (0x1b,a6) /* TxDataC */
+
+    move.w      #0xcbaf, (0xA13006) /* some scratch area */
 
     move.l      #0xff0000, a1
     move.l      #0x10000/4/4-1, d2
@@ -277,20 +280,36 @@ run_game:
     beq.s       sync_hvc
 
     movea.l     #0xa10003, a0
-    movea.l     d0, a7
     bsr         sync_with_teensy  /* trashes d3 */
     move.l      d0, (-4,a7)
 
 sync_hvc:
+    addq.l      #1, d6        /* attempt counter */
+
     /* set up for progress vram write (x,y - tile #) */
     /* GFX_WRITE_VRAM_ADDR(0xc000 + (x + 64 * y) * 2) */
     /* d = d5 + '0' - 32 + 0xB000/32 - 128 = d5 + 0x510 */
-    moveq.l #0, d5
     move.l      #(0x40000003 | ((36 + 64*1) << 17)), (a3)
     add.w       #0x510, d5
     move.w      d5, (a5)
     move.w      #('/'+0x4e0), (a5)
-    move.w      #('6'+0x4e0), (a5)
+    move.w      #('4'+0x4e0), (a5)
+
+    lea         hexchars, a1
+    move.l      #(0x40000003 | ((31 + 64*2) << 17)), (a3)
+    moveq.l     #8-1, d5
+0:
+    rol.l       #4, d3
+    move.b      d3, d4
+    and.l       #0x0f, d4
+    move.b      (d4,a1), d4
+    add.w       #0x4e0, d4
+    move.w      d4, (a5)
+    dbra        d5, 0b
+
+    movea.l     #0xc00008, a0
+    movea.l     #0x3ff000, a1
+    movea.l     #0xffffe0, a2
 
     /* wait for active display */
     moveq.l     #3, d2
@@ -306,33 +325,72 @@ sync_hvc:
     move.w      d0, (a5)
 .endr
 
-    movea.l     #0xc00008, a1
-    movea.l     #0xc00008, a1
-    btst.b      #7, (0xa10001)
-    bne         sync_hvc_pal
+                                 /* 60Hz         50Hz */
+    move.l      (a0), (a1)+      /* #0xff06ff08* #0xff07ff09- */
+    move.l      (a0), (a1)+      /* #0xff00ff11* #0xff00ff11  */
+    move.l      (a0), (a1)+      /* #0xff18ff1a  #0xff18ff1a  */
+    move.l      (a0), (a1)+      /* #0xff21ff23  #0xff21ff23  */
+    move.l      (a0), (a1)+      /* #0xff2aff28  #0xff2aff28  */
+    move.l      (a0), (a1)+      /* #0xff33ff34  #0xff33ff34  */
+    move.l      (a0), (a1)+      /* #0xff3bff3d  #0xff3cff3e- */
+    move.l      (a0), (a1)+      /* #0xff45ff47* #0xff45ff47  */
 
-    move.l      (a1), d3
-    cmp.l       #0xff1fff21, d3
-    bne.s       sync_hvc
-    move.l      (a1), d3
-    cmp.l       #0xff2eff2f, d3
-    bne.s       sync_hvc
-    move.l      (a1), d3
-    cmp.l       #0xff3dff3f, d3
-    bne.s       sync_hvc
-    /* move.l      (a1), d3  -> #0xff4cff4e */
+    /* as long as exactly 8 or more RAM writes are performed here, */
+    /* after multiple tries RAM refresh somehow eventually syncs */
+    move.l      (a0), (a2)+      /* #0xff4eff4f  #0xff4eff4f  */
+    move.l      (a0), (a2)+      /* #0xff56ff58  #0xff58ff59- */
+    move.l      (a0), (a2)+      /* #0xff60ff62  #0xff60ff62  */
+    move.l      (a0), (a2)+      /* #0xff69ff6b  #0xff69ff6b  */
+    move.l      (a0), (a2)+      /* #0xff72ff74  #0xff72ff74  */
+    move.l      (a0), (a2)+      /* #0xff7bff7c  #0xff7bff7c  */
+    move.l      (a0), (a2)+      /* #0xff83ff85  #0xff83ff85  */
+    move.l      (a0), (a2)+      /* #0xff8cff8e  #0xff8eff8f- */
 
-    move.w      d0, (-2,a7)
+    moveq.l     #1, d5
+    sub.l       #4*8, a1
+    btst.b      #6, (0xa10001)
+    bne.s       sync_hvc_50hz
 
-    move.l      (a1), d3
-    cmp.l       #0xff53ff55, d3
-    bne.s       sync_hvc
-    move.l      (a1), d3
-    cmp.l       #0xff62ff63, d3
-    bne.s       sync_hvc
+    move.l      (0x00,a1), d3
+    cmp.l       #0xff06ff08, d3
+    bne.w       sync_hvc
 
-sync_hvc_pal:
-    /* TODO */
+    moveq.l     #2, d5
+    move.l      (0x04,a1), d3
+    cmp.l       #0xff00ff11, d3  /* mystery value */
+    bne.w       sync_hvc
+
+    moveq.l     #3, d5
+    move.l      (0x1c,a1), d3
+    cmp.l       #0xff45ff47, d3
+    bne.w       sync_hvc
+
+    moveq.l     #4, d5
+    move.l      (-4,a2), d3
+    cmp.l       #0xff8cff8e, d3  /* RAM */
+    bne.w       sync_hvc
+
+    bra.s       0f
+
+sync_hvc_50hz:
+    move.l      (0x00,a1), d3
+    cmp.l       #0xff07ff09, d3
+    bne.w       sync_hvc
+
+    moveq.l     #2, d5
+    move.l      (0x04,a1), d3
+    cmp.l       #0xff00ff11, d3  /* mystery value */
+    bne.w       sync_hvc
+
+    moveq.l     #3, d5
+    move.l      (0x1c,a1), d3
+    cmp.l       #0xff45ff47, d3
+    bne.w       sync_hvc
+
+    moveq.l     #4, d5
+    move.l      (-4,a2), d3
+    cmp.l       #0xff8eff8f, d3  /* RAM */
+    bne.w       sync_hvc
 
 0:
     movea.l     d0, a0
@@ -353,5 +411,9 @@ run_game_r:
 
     jmp         (a0)
 run_game_r_end:
+
+hexchars:
+    dc.b        '0','1','2','3','4','5','6','7'
+    dc.b        '8','9','a','b','c','d','e','f'
 
 # vim:filetype=asmM68k:ts=4:sw=4:expandtab
