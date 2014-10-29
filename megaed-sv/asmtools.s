@@ -325,54 +325,33 @@ sync_hvc:
     move.w      d0, (a5)
 .endr
 
-                                 /* 60Hz         50Hz */
-    move.l      (a0), (a1)+      /* #0xff06ff08* #0xff07ff09- */
-    move.l      (a0), (a1)+      /* #0xff00ff11* #0xff00ff11  */
-    move.l      (a0), (a1)+      /* #0xff18ff1a  #0xff18ff1a  */
-    move.l      (a0), (a1)+      /* #0xff21ff23  #0xff21ff23  */
-    move.l      (a0), (a1)+      /* #0xff2aff28  #0xff2aff28  */
-    move.l      (a0), (a1)+      /* #0xff33ff34  #0xff33ff34  */
-    move.l      (a0), (a1)+      /* #0xff3bff3d  #0xff3cff3e- */
-    move.l      (a0), (a1)+      /* #0xff45ff47* #0xff45ff47  */
+    /* these seem stable for both 50Hz/60Hz */
+    move.l      (a0), (a1)+      /* #0xff07ff09 */
+    move.l      (a0), (a1)+      /* #0xff00ff11 */
+    move.l      (a0), (a1)+      /* #0xff18ff1a */
+    move.l      (a0), (a1)+      /* #0xff21ff23 */
+    move.l      (a0), (a1)+      /* #0xff2aff28 */
+    move.l      (a0), (a1)+      /* #0xff33ff34 */
+    move.l      (a0), (a1)+      /* #0xff3cff3e */
+    move.l      (a0), (a1)+      /* #0xff45ff47 */
 
     /* as long as exactly 8 or more RAM writes are performed here, */
     /* after multiple tries RAM refresh somehow eventually syncs */
-    move.l      (a0), (a2)+      /* #0xff4eff4f  #0xff4eff4f  */
-    move.l      (a0), (a2)+      /* #0xff56ff58  #0xff58ff59- */
-    move.l      (a0), (a2)+      /* #0xff60ff62  #0xff60ff62  */
-    move.l      (a0), (a2)+      /* #0xff69ff6b  #0xff69ff6b  */
-    move.l      (a0), (a2)+      /* #0xff72ff74  #0xff72ff74  */
-    move.l      (a0), (a2)+      /* #0xff7bff7c  #0xff7bff7c  */
-    move.l      (a0), (a2)+      /* #0xff83ff85  #0xff83ff85  */
-    move.l      (a0), (a2)+      /* #0xff8cff8e  #0xff8eff8f- */
+    /* after cold boot, only 50Hz syncs to always same values though, */
+    /* so values below are 50Hz */
+    move.l      (a0), (a2)+      /* #0xff4eff4f */
+    move.l      (a0), (a2)+      /* #0xff58ff59 */
+    move.l      (a0), (a2)+      /* #0xff60ff62 */
+    move.l      (a0), (a2)+      /* #0xff69ff6b */
+    move.l      (a0), (a2)+      /* #0xff72ff74 */
+    move.l      (a0), (a2)+      /* #0xff7bff7c */
+    move.l      (a0), (a2)+      /* #0xff83ff85 */
+    move.l      (a0), (a2)+      /* #0xff8eff8f */
+
+    sub.l       #4*8, a1
+    sub.l       #4*8, a2
 
     moveq.l     #1, d5
-    sub.l       #4*8, a1
-    btst.b      #6, (0xa10001)
-    bne.s       sync_hvc_50hz
-
-    move.l      (0x00,a1), d3
-    cmp.l       #0xff06ff08, d3
-    bne.w       sync_hvc
-
-    moveq.l     #2, d5
-    move.l      (0x04,a1), d3
-    cmp.l       #0xff00ff11, d3  /* mystery value */
-    bne.w       sync_hvc
-
-    moveq.l     #3, d5
-    move.l      (0x1c,a1), d3
-    cmp.l       #0xff45ff47, d3
-    bne.w       sync_hvc
-
-    moveq.l     #4, d5
-    move.l      (-4,a2), d3
-    cmp.l       #0xff8cff8e, d3  /* RAM */
-    bne.w       sync_hvc
-
-    bra.s       0f
-
-sync_hvc_50hz:
     move.l      (0x00,a1), d3
     cmp.l       #0xff07ff09, d3
     bne.w       sync_hvc
@@ -387,12 +366,28 @@ sync_hvc_50hz:
     cmp.l       #0xff45ff47, d3
     bne.w       sync_hvc
 
+    btst.b      #6, (0xa10001)
+    bne.s       sync_hvc_50hz
+
+sync_hvc_60hz:
+    /* unable to get stable RAM between cold boots :( */
     moveq.l     #4, d5
-    move.l      (-4,a2), d3
+    move.l      (0x1c,a2), d3
+    cmp.l       #0xff8dff8f, d3  /* unstable */
+    beq.s       sync_hvc_end
+    cmp.l       #0xff8cff8e, d3  /* stable? */
+    beq.s       sync_hvc_end
+    cmp.l       #0xff8eff90, d3
+    beq.s       sync_hvc_end
+    bra.w       sync_hvc
+
+sync_hvc_50hz:
+    moveq.l     #4, d5
+    move.l      (0x1c,a2), d3
     cmp.l       #0xff8eff8f, d3  /* RAM */
     bne.w       sync_hvc
 
-0:
+sync_hvc_end:
     movea.l     d0, a0
     movea.l     #0xA13000, a1
 
