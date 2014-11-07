@@ -22,6 +22,7 @@ struct tas_pkt {
 			uint8_t stream_from;
 			// frame increment on read
 			uint8_t use_readinc;
+			uint8_t no_start_seq;
 		} enable;
 	};
 } __attribute__((packed));

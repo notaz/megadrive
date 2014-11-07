@@ -194,6 +194,33 @@ static void portc_isr_frameinc_do_from(void)
 	g.frame_cnt++;
 }
 
+static void choose_isrs(void)
+{
+	if (g.stream_enable_to) {
+		if (g.use_readinc) {
+			attachInterruptVector(IRQ_PORTB, portb_isr_do_to_inc);
+			attachInterruptVector(IRQ_PORTC, portc_isr_nop);
+		}
+		else {
+			attachInterruptVector(IRQ_PORTB, portb_isr_do_to);
+			attachInterruptVector(IRQ_PORTC, portc_isr_frameinc);
+		}
+	}
+	else if (g.stream_enable_from) {
+		g.use_pending = 1;
+		if (g.use_readinc) {
+			attachInterruptVector(IRQ_PORTB,
+						portb_isr_fixed_do_from);
+			attachInterruptVector(IRQ_PORTC, portc_isr_nop);
+		}
+		else {
+			attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
+			attachInterruptVector(IRQ_PORTC,
+					      portc_isr_frameinc_do_from);
+		}
+	}
+}
+
 static void udelay(uint32_t us)
 {
 	uint32_t start = micros();
@@ -276,30 +303,8 @@ static void do_start_seq(void)
 	}
 
 	__disable_irq();
+	choose_isrs();
 	g.stream_started = 1;
-	if (g.stream_enable_to) {
-		if (g.use_readinc) {
-			attachInterruptVector(IRQ_PORTB, portb_isr_do_to_inc);
-			attachInterruptVector(IRQ_PORTC, portc_isr_nop);
-		}
-		else {
-			attachInterruptVector(IRQ_PORTB, portb_isr_do_to);
-			attachInterruptVector(IRQ_PORTC, portc_isr_frameinc);
-		}
-	}
-	else if (g.stream_enable_from) {
-		g.use_pending = 1;
-		if (g.use_readinc) {
-			attachInterruptVector(IRQ_PORTB,
-						portb_isr_fixed_do_from);
-			attachInterruptVector(IRQ_PORTC, portc_isr_nop);
-		}
-		else {
-			attachInterruptVector(IRQ_PORTB, portb_isr_fixed);
-			attachInterruptVector(IRQ_PORTC,
-					      portc_isr_frameinc_do_from);
-		}
-	}
 	__enable_irq();
 }
 
@@ -350,6 +355,11 @@ static void do_usb(void *buf)
 		g.stream_enable_to = pkt->enable.stream_to;
 		g.stream_enable_from = pkt->enable.stream_from;
 		g.use_readinc = pkt->enable.use_readinc;
+		if (pkt->enable.no_start_seq) {
+			GPIOD_PDOR = 0x3f;
+			choose_isrs();
+			g.stream_started = 1;
+		}
 		__enable_irq();
 		break;
 	case PKT_STREAM_ABORT:

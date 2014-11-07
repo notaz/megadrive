@@ -673,6 +673,7 @@ int main(int argc, char *argv[])
   const char *logfn = NULL;
   uint8_t *tas_data = NULL;
   int use_vsync = 0; // frame increment on vsync
+  int no_start_seq = 0;
   int tas_skip = 0;
   int enable_sent = 0;
   int abort_sent = 0;
@@ -717,6 +718,9 @@ int main(int argc, char *argv[])
         continue;
       case 'v':
         use_vsync = 1;
+        continue;
+      case 'n':
+        no_start_seq = 1;
         continue;
       default:
         fprintf(stderr, "bad arg: %s\n", argv[i]);
@@ -1043,6 +1047,7 @@ int main(int argc, char *argv[])
       pkt_out.enable.stream_to = (tas_data != NULL);
       pkt_out.enable.stream_from = (outf != NULL);
       pkt_out.enable.use_readinc = !use_vsync;
+      pkt_out.enable.no_start_seq = no_start_seq;
 
       ret = submit_urb(dev.fd, &urb[URB_DATA_OUT], dev.ifaces[0].ep_out,
                        &pkt_out, sizeof(pkt_out));
