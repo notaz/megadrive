@@ -661,7 +661,7 @@ int main(int argc, char *argv[])
   struct teensy_dev dev;
   struct usbdevfs_urb urb[URB_CNT];
   struct usbdevfs_urb *reaped_urb;
-  int fixed_input_changed;
+  int fixed_input_changed = 0;
   int evdev_fds[16];
   int evdev_fd_cnt = 0;
   int evdev_support;
@@ -925,7 +925,6 @@ int main(int argc, char *argv[])
     }
 
     /* something from input devices? */
-    fixed_input_changed = 0;
     for (i = 0; i < evdev_fd_cnt; i++) {
       if (FD_ISSET(evdev_fds[i], &rfds)) {
         fixed_input_changed |=
@@ -1071,6 +1070,7 @@ int main(int argc, char *argv[])
         perror("USBDEVFS_SUBMITURB PKT_FIXED_STATE");
         break;
       }
+      fixed_input_changed = 0;
       pending_urbs |= 1 << URB_DATA_OUT;
       continue;
     }
