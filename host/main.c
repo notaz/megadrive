@@ -422,6 +422,28 @@ int do_evdev_input(int fd)
   return memcmp(old_state, fixed_input_state, STATE_BYTES) ? 1 : 0;
 }
 
+#define MAX_INPUT_BYTES 2
+
+// TODO: 6btn
+static int tas_data_to_teensy(uint16_t b, uint8_t *data, FILE *logf)
+{
+  uint8_t t;
+
+  /* SCBA RLDU */
+  /*     v     */
+  /* ?0SA 00DU, ?1CB RLDU */
+  data[0] = (b & 0x13) | ((b >> 2) & 0x20);
+  data[1] = (b & 0x0f) | ((b >> 1) & 0x30);
+
+  if (logf != NULL) {
+    fwrite(&data[0], 1, 1, logf);
+    t = data[1] | 0x40; // expected TH
+    fwrite(&t, 1, 1, logf);
+  }
+
+  return 2;
+}
+
 struct gmv_tas {
   char sig[15];
   char ver;
@@ -433,12 +455,17 @@ struct gmv_tas {
   uint8_t data[0][3];
 };
 
-static uint8_t *import_gmv(FILE *f, long size, int *frame_count)
+static uint8_t *import_gmv(FILE *f, long size, int *byte_count, FILE *logf)
 {
   struct gmv_tas *gmv;
+  int frame_count;
+  int count = 0;
+  uint16_t val;
   uint8_t *out;
   int ret;
   int i;
+
+  *byte_count = 0;
 
   if (size < (long)sizeof(*gmv)) {
     fprintf(stderr, "bad gmv size: %ld\n", size);
@@ -457,11 +484,11 @@ static uint8_t *import_gmv(FILE *f, long size, int *frame_count)
     return NULL;
   }
 
-  *frame_count = (size - sizeof(*gmv)) / sizeof(gmv->data[0]);
+  frame_count = (size - sizeof(*gmv)) / sizeof(gmv->data[0]);
 
   /* check the GMV.. */
-  if (*frame_count <= 0 || size != sizeof(*gmv) + *frame_count * 3) {
-    fprintf(stderr, "broken gmv? frames=%d\n", *frame_count);
+  if (frame_count <= 0 || size != sizeof(*gmv) + frame_count * 3) {
+    fprintf(stderr, "broken gmv? frames=%d\n", frame_count);
     return NULL;
   }
 
@@ -490,16 +517,17 @@ static uint8_t *import_gmv(FILE *f, long size, int *frame_count)
   gmv->name[39] = 0;
   printf("loaded GMV: %s\n", gmv->name);
   printf("%d frames, %u rerecords\n",
-         *frame_count, gmv->rerecord_count);
+         frame_count, gmv->rerecord_count);
 
-  out = malloc(*frame_count * sizeof(out[0]));
+  out = malloc(frame_count * MAX_INPUT_BYTES);
   if (out == NULL) {
     fprintf(stderr, "OOM?\n");
     return NULL;
   }
 
-  for (i = 0; i < *frame_count; i++) {
-    out[i] = gmv->data[i][0];
+  for (i = 0; i < frame_count; i++) {
+    val = gmv->data[i][0] | ((gmv->data[i][2] & 0x0f) << 8);
+    count += tas_data_to_teensy(val, out + count, logf);
 
     if (gmv->data[i][1] != 0xff || gmv->data[i][2] != 0xff)
     {
@@ -508,10 +536,11 @@ static uint8_t *import_gmv(FILE *f, long size, int *frame_count)
     }
   }
 
+  *byte_count = count;
   return out;
 }
 
-static int do_bkm_char(char c, char expect, uint8_t *val, int bit)
+static int do_bkm_char(char c, char expect, uint16_t *val, int bit)
 {
   if (c == expect) {
     *val &= ~(1 << bit);
@@ -525,9 +554,11 @@ static int do_bkm_char(char c, char expect, uint8_t *val, int bit)
   return 1;
 }
 
-static uint8_t *import_bkm(FILE *f, int *frame_count)
+static uint8_t *import_bkm(FILE *f, int *byte_count, FILE *logf)
 {
-  uint8_t *out = NULL, val;
+  uint8_t *out = NULL;
+  uint16_t val;
+  int frames = 0;
   int count = 0;
   int alloc = 0;
   int line = 0;
@@ -536,7 +567,8 @@ static uint8_t *import_bkm(FILE *f, int *frame_count)
   char *p;
   int i;
 
-  while ((p = fgets(buf, sizeof(buf), f)) != NULL) {
+  while ((p = fgets(buf, sizeof(buf), f)) != NULL)
+  {
     line++;
     if (p[0] != '|')
       continue;
@@ -547,7 +579,7 @@ static uint8_t *import_bkm(FILE *f, int *frame_count)
       goto unhandled_line;
     p[30] = 0;
 
-    if (count >= alloc) {
+    if (count >= alloc - MAX_INPUT_BYTES) {
       alloc = alloc * 2 + 64;
       out = realloc(out, alloc * sizeof(out[0]));
       if (out == NULL) {
@@ -556,7 +588,7 @@ static uint8_t *import_bkm(FILE *f, int *frame_count)
       }
     }
 
-    val = 0xff;
+    val = 0xfff;
 
     if (strncmp(p, "|.|", 3) != 0)
       goto unhandled_line;
@@ -571,7 +603,8 @@ static uint8_t *import_bkm(FILE *f, int *frame_count)
     if (strcmp(p, "....|............||") != 0)
       goto unhandled_line;
 
-    out[count++] = val;
+    count += tas_data_to_teensy(val, out + count, logf);
+    frames++;
     continue;
 
 unhandled_line:
@@ -579,8 +612,69 @@ unhandled_line:
     return NULL;
   }
 
-  printf("loaded bkm, %d frames\n", count);
-  *frame_count = count;
+  printf("loaded bkm, %d frames, %d bytes\n", frames, count);
+  *byte_count = count;
+  return out;
+}
+
+static uint8_t *import_raw(FILE *f, int *byte_count, FILE *logf)
+{
+  uint8_t *out = NULL, val;
+  int count = 0;
+  int alloc = 0;
+  int line = 0;
+  int first = 1;
+  char buf[256];
+  char *p;
+  int i;
+
+  while ((p = fgets(buf, sizeof(buf), f)) != NULL)
+  {
+    line++;
+    if (p[0] == '#')
+      continue;
+    if (p[0] != 'e') {
+      printf("skipping: %s", p);
+      continue;
+    }
+
+    val = 0;
+    p++;
+    for (i = 6; i >= 0; i--, p++) {
+      if (*p != '0' && *p != '1')
+        goto bad;
+      if (*p == '1')
+        val |= 1 << i;
+    }
+    if (*p != ' ')
+      goto bad;
+
+    if (first && (val & 0x40))
+      continue; // XXX..
+    first = 0;
+
+    if (count >= alloc) {
+      alloc = alloc * 2 + 64;
+      out = realloc(out, alloc * sizeof(out[0]));
+      if (out == NULL) {
+        fprintf(stderr, "OOM?\n");
+        return NULL;
+      }
+    }
+
+    if (logf)
+      fwrite(&val, 1, 1, logf);
+
+    out[count++] = val & 0x3f;
+    continue;
+
+bad:
+    fprintf(stderr, "bad raw line %d: '%s'\n", line, buf);
+    return NULL;
+  }
+
+  printf("loaded raw, %d bytes\n", count);
+  *byte_count = count;
   return out;
 }
 
@@ -609,25 +703,6 @@ static int write_bkm_frame(FILE *f, const uint8_t *data)
   fprintf(f, "|\n");
 
 out:
-  return 2;
-}
-
-static int tas_data_to_teensy(uint8_t b, uint8_t *data, FILE *logf)
-{
-  uint8_t t;
-
-  /* SCBA RLDU */
-  /*     v     */
-  /* ?0SA 00DU, ?1CB RLDU */
-  data[0] = (b & 0x13) | ((b >> 2) & 0x20);
-  data[1] = (b & 0x0f) | ((b >> 1) & 0x30);
-
-  if (logf != NULL) {
-    fwrite(&data[0], 1, 1, logf);
-    t = data[1] | 0x40; // expected TH
-    fwrite(&t, 1, 1, logf);
-  }
-
   return 2;
 }
 
@@ -672,13 +747,14 @@ int main(int argc, char *argv[])
   const char *outfn = NULL;
   const char *logfn = NULL;
   uint8_t *tas_data = NULL;
+  int tas_data_size = 0;
+  int bytes_sent = 0;
   int use_vsync = 0; // frame increment on vsync
   int no_start_seq = 0;
   int tas_skip = 0;
   int enable_sent = 0;
   int abort_sent = 0;
   int frame_count = 0;
-  int frames_sent = 0;
   char buf_dbg[64 + 1];
   struct tas_pkt pkt_in;
   struct tas_pkt pkt_out;
@@ -752,6 +828,15 @@ int main(int argc, char *argv[])
     evdev_fds[evdev_fd_cnt++] = fd;
   }
 
+  if (logfn != NULL) {
+    logf = fopen(logfn, "wb");
+    if (logf == NULL) {
+      fprintf(stderr, "fopen %s: ", logfn);
+      perror("");
+      return 1;
+    }
+  }
+
   if (tasfn != NULL) {
     const char *ext;
     long size;
@@ -779,14 +864,21 @@ int main(int argc, char *argv[])
       ext++;
 
     if (strcasecmp(ext, "gmv") == 0)
-      tas_data = import_gmv(f, size, &frame_count);
+      tas_data = import_gmv(f, size, &tas_data_size, logf);
     else if (strcasecmp(ext, "bkm") == 0)
-      tas_data = import_bkm(f, &frame_count);
+      tas_data = import_bkm(f, &tas_data_size, logf);
+    else if (strcasecmp(ext, "txt") == 0)
+      tas_data = import_raw(f, &tas_data_size, logf);
     else {
       fprintf(stderr, "unknown movie type: '%s'\n", ext);
       return 1;
     }
     fclose(f);
+
+    if (logf != NULL) {
+      rewind(logf);
+      logf = NULL;
+    }
 
     if (tas_data == NULL) {
       fprintf(stderr, "failed fo parse %s\n", tasfn);
@@ -794,26 +886,27 @@ int main(int argc, char *argv[])
     }
 
     if (tas_skip != 0) {
-      if (tas_skip >= frame_count || tas_skip <= -frame_count) {
-        printf("skip out of range: %d/%d\n", tas_skip, frame_count);
+      // FIXME: no longer a byte
+      if (tas_skip >= tas_data_size || tas_skip <= -tas_data_size) {
+        printf("skip out of range: %d/%d\n", tas_skip, tas_data_size);
         return 1;
       }
       if (tas_skip > 0) {
-        frame_count -= tas_skip;
+        tas_data_size -= tas_skip;
         memmove(&tas_data[0], &tas_data[tas_skip],
-          sizeof(tas_data[0]) * frame_count);
+          sizeof(tas_data[0]) * tas_data_size);
       }
       else {
         tas_data = realloc(tas_data,
-                     (frame_count - tas_skip) * sizeof(tas_data[0]));
+                     (tas_data_size - tas_skip) * sizeof(tas_data[0]));
         if (tas_data == NULL) {
           fprintf(stderr, "OOM?\n");
           return 1;
         }
         memmove(&tas_data[-tas_skip], &tas_data[0],
-          sizeof(tas_data[0]) * frame_count);
+          sizeof(tas_data[0]) * tas_data_size);
         memset(&tas_data[0], 0xff, sizeof(tas_data[0]) * -tas_skip);
-        frame_count -= tas_skip;
+        tas_data_size -= tas_skip;
       }
     }
   }
@@ -822,15 +915,6 @@ int main(int argc, char *argv[])
     outf = fopen(outfn, "w");
     if (outf == NULL) {
       fprintf(stderr, "fopen %s: ", outfn);
-      perror("");
-      return 1;
-    }
-  }
-
-  if (logfn != NULL) {
-    logf = fopen(logfn, "wb");
-    if (logf == NULL) {
-      fprintf(stderr, "fopen %s: ", logfn);
       perror("");
       return 1;
     }
@@ -860,7 +944,7 @@ int main(int argc, char *argv[])
       wait_device = 0;
       pending_urbs = 0;
       enable_sent = 0;
-      frames_sent = 0;
+      bytes_sent = 0;
 
       /* we wait first, then send commands, but if teensy
        * is started already, it won't send anything */
@@ -918,8 +1002,6 @@ int main(int argc, char *argv[])
       switch (c) {
       case 'r':
         enable_sent = 0;
-        if (logf != NULL)
-          rewind(logf);
         break;
       }
     }
@@ -968,27 +1050,22 @@ int main(int argc, char *argv[])
         /* some request from teensy */
         switch (pkt_in.type) {
         case PKT_STREAM_REQ:
-          printf("req: %d/%d/%d\n", pkt_in.req.frame,
-            frames_sent, frame_count);
+          printf("req: %d/%d/%d\n", pkt_in.req.frame * 2,
+            bytes_sent, tas_data_size);
 
           pkt_out.size = 0;
-          if (frames_sent < frame_count) {
+          if (bytes_sent < tas_data_size) {
             pkt_out.type = PKT_STREAM_DATA_TO;
 
-            for (i = 0; i < sizeof(pkt_out.data); ) {
-              i += tas_data_to_teensy(tas_data[frames_sent],
-                     pkt_out.data + i, logf);
-
-              frames_sent++;
-              if (frames_sent >= frame_count)
-                break;
-            }
+            i = tas_data_size - bytes_sent;
+            if (i > sizeof(pkt_out.data))
+              i = sizeof(pkt_out.data);
+            memcpy(pkt_out.data, tas_data + bytes_sent, i);
+            bytes_sent += i;
             pkt_out.size = i;
           }
           else {
             pkt_out.type = PKT_STREAM_END;
-            if (logf != NULL)
-              fflush(logf);
           }
 
           ret = submit_urb(dev.fd, &urb[URB_DATA_OUT],
@@ -1056,7 +1133,7 @@ int main(int argc, char *argv[])
       }
       pending_urbs |= 1 << URB_DATA_OUT;
       enable_sent = 1;
-      frames_sent = 0;
+      bytes_sent = 0;
       continue;
     }
     if (tas_data == NULL && fixed_input_changed) {
@@ -1100,8 +1177,6 @@ dev_close:
 
   if (outf != NULL)
     fclose(outf);
-  if (logf != NULL)
-    fclose(logf);
 
   if (dev.fd != -1) {
     /* deal with pending URBs */
