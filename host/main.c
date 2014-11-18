@@ -786,12 +786,6 @@ int main(int argc, char *argv[])
           missing_arg(i);
         logfn = argv[i];
         continue;
-      case 's':
-        i++;
-        if (argv[i] == NULL)
-          missing_arg(i);
-        tas_skip = atoi(argv[i]);
-        continue;
       case 'v':
         use_vsync = 1;
         continue;
@@ -883,31 +877,6 @@ int main(int argc, char *argv[])
     if (tas_data == NULL) {
       fprintf(stderr, "failed fo parse %s\n", tasfn);
       return 1;
-    }
-
-    if (tas_skip != 0) {
-      // FIXME: no longer a byte
-      if (tas_skip >= tas_data_size || tas_skip <= -tas_data_size) {
-        printf("skip out of range: %d/%d\n", tas_skip, tas_data_size);
-        return 1;
-      }
-      if (tas_skip > 0) {
-        tas_data_size -= tas_skip;
-        memmove(&tas_data[0], &tas_data[tas_skip],
-          sizeof(tas_data[0]) * tas_data_size);
-      }
-      else {
-        tas_data = realloc(tas_data,
-                     (tas_data_size - tas_skip) * sizeof(tas_data[0]));
-        if (tas_data == NULL) {
-          fprintf(stderr, "OOM?\n");
-          return 1;
-        }
-        memmove(&tas_data[-tas_skip], &tas_data[0],
-          sizeof(tas_data[0]) * tas_data_size);
-        memset(&tas_data[0], 0xff, sizeof(tas_data[0]) * -tas_skip);
-        tas_data_size -= tas_skip;
-      }
     }
   }
 
