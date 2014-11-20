@@ -215,6 +215,17 @@ static noinline int printf(const char *fmt, ...)
     return d; // wrong..
 }
 
+static u8 gethex(char c)
+{
+    if ('0' <= c && c <= '9')
+        return c - '0';
+    if ('a' <= c && c <= 'f')
+        return c - 'a' + 10;
+    if ('A' <= c && c <= 'F')
+        return c - 'A' + 10;
+    return 0;
+}
+
 static const char *exc_names[] = {
     NULL,
     NULL,
@@ -510,6 +521,12 @@ static int do_run(OsRoutine *ed, u8 b3, int tas_sync)
         break;
     case 'M':
         mapper = MTYPE_10M;
+        break;
+    case 'n':
+        // raw numer: hex XX: mtype | x;
+        // x: bits [4-7]: SRAM_ON, SRAM_3M_ON, SNAP_SAVE_ON, MKEY
+        mapper  = gethex(ed->usbReadByte()) << 4;
+        mapper |= gethex(ed->usbReadByte());
         break;
     default:
         return -1;
