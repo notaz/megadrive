@@ -642,7 +642,7 @@ unhandled_line:
   return 0;
 }
 
-static int import_raw(FILE *f, uint8_t *out[2], int out_byte_count[2],
+static int import_raw(FILE *f, uint8_t **out, int *out_byte_count,
   FILE *logf)
 {
   int count = 0;
@@ -654,7 +654,7 @@ static int import_raw(FILE *f, uint8_t *out[2], int out_byte_count[2],
   char *p;
   int i;
 
-  out_byte_count[0] = out_byte_count[1] = 0;
+  *out_byte_count = 0;
 
   while ((p = fgets(buf, sizeof(buf), f)) != NULL)
   {
@@ -683,8 +683,8 @@ static int import_raw(FILE *f, uint8_t *out[2], int out_byte_count[2],
 
     if (count >= alloc) {
       alloc = alloc * 2 + 64;
-      out[0] = realloc(out[0], alloc * sizeof(out[0][0]));
-      if (out[0] == NULL) {
+      *out = realloc(*out, alloc * sizeof((*out)[0]));
+      if (*out == NULL) {
         fprintf(stderr, "OOM?\n");
         return -1;
       }
@@ -693,7 +693,7 @@ static int import_raw(FILE *f, uint8_t *out[2], int out_byte_count[2],
     if (logf)
       fwrite(&val, 1, 1, logf);
 
-    out[0][count++] = val & 0x3f;
+    (*out)[count++] = val & 0x3f;
     continue;
 
 bad:
@@ -702,7 +702,7 @@ bad:
   }
 
   printf("loaded raw, %d bytes\n", count);
-  out_byte_count[0] = count;
+  *out_byte_count = count;
   return 0;
 }
 
@@ -772,12 +772,14 @@ int main(int argc, char *argv[])
   int pending_urbs = 0;
   fd_set rfds, wfds;
   const char *tasfn = NULL;
+  const char *tasfn_p2 = NULL;
   const char *outfn = NULL;
   const char *logfn = NULL;
   uint8_t *tas_data[2] = { NULL, NULL };
   int tas_data_size[2] = { 0, 0 };
   int bytes_sent[2] = { 0, 0 };
   int use_vsync = 0; // frame increment on vsync
+  int separate_2p = 0;
   int no_start_seq = 0;
   int enable_sent = 0;
   int abort_sent = 0;
@@ -800,6 +802,12 @@ int main(int argc, char *argv[])
         if (argv[i] == NULL)
           missing_arg(i);
         tasfn = argv[i];
+        continue;
+      case '2':
+        i++;
+        if (argv[i] == NULL)
+          missing_arg(i);
+        tasfn_p2 = argv[i];
         continue;
       case 'w':
         i++;
@@ -859,15 +867,24 @@ int main(int argc, char *argv[])
   }
 
   if (tasfn != NULL) {
+    FILE *f, *f_p2 = NULL;
     const char *ext;
     long size;
-    FILE *f;
 
     f = fopen(tasfn, "rb");
     if (f == NULL) {
       fprintf(stderr, "fopen %s: ", tasfn);
       perror("");
       return 1;
+    }
+
+    if (tasfn_p2 != NULL) {
+      f_p2 = fopen(tasfn_p2, "rb");
+      if (f_p2 == NULL) {
+        fprintf(stderr, "fopen %s: ", tasfn_p2);
+        perror("");
+        return 1;
+      }
     }
 
     fseek(f, 0, SEEK_END);
@@ -889,22 +906,34 @@ int main(int argc, char *argv[])
     else if (strcasecmp(ext, "bkm") == 0)
       ret = import_bkm(f, tas_data, tas_data_size, logf);
     else if (strcasecmp(ext, "txt") == 0)
-      ret = import_raw(f, tas_data, tas_data_size, logf);
+      ret = import_raw(f, &tas_data[0], &tas_data_size[0], logf);
     else {
       fprintf(stderr, "unknown movie type: '%s'\n", ext);
       return 1;
     }
     fclose(f);
 
-    if (logf != NULL) {
-      rewind(logf);
-      logf = NULL;
-    }
-
     if (ret != 0 || tas_data[0] == NULL || tas_data_size[0] <= 0) {
       fprintf(stderr, "failed fo parse %s\n", tasfn);
       return 1;
     }
+
+    // separate file with p2 input?
+    if (f_p2 != NULL) {
+      ret = import_raw(f_p2, &tas_data[1], &tas_data_size[1], NULL);
+      if (ret != 0 || tas_data[1] == NULL || tas_data_size[1] <= 0) {
+        fprintf(stderr, "failed fo parse %s\n", tasfn_p2);
+        return 1;
+      }
+      fclose(f_p2);
+      separate_2p = 1;
+    }
+
+    if (logf != NULL) {
+      fclose(logf);
+      logf = NULL;
+    }
+
     if (tas_data_size[1] != 0 && tas_data[1] == NULL) {
       fprintf(stderr, "missing tas_data[1]\n");
       return 1;
@@ -1130,6 +1159,8 @@ int main(int argc, char *argv[])
       pkt_out.enable.no_start_seq = no_start_seq;
       if (use_vsync)
         pkt_out.enable.inc_mode = INC_MODE_VSYNC;
+      else if (tas_data_size[1] != 0 && separate_2p)
+        pkt_out.enable.inc_mode = INC_MODE_SEPARATE;
       else if (tas_data_size[1] != 0)
         pkt_out.enable.inc_mode = INC_MODE_SHARED_PL2;
       else

@@ -105,7 +105,7 @@ static void pl1th_isr_fixed(void)
 	g.edge_cnt++;
 }
 
-static noinline void do_to_step(void)
+static noinline void do_to_step_pl1(void)
 {
 	g.frame_cnt++;
 
@@ -125,7 +125,7 @@ static void pl1th_isr_do_to_inc(void)
 
 	GPIOD_PDOR = g.stream_to[0][g.pos_to_p[0].o][th];
 	if (th)
-		do_to_step();
+		do_to_step_pl1();
 }
 
 static void pl1th_isr_do_to(void)
@@ -157,7 +157,29 @@ static void pl2th_isr_fixed(void)
 	GPIOB_PDOR = PL2_ADJ(v);
 }
 
-static void pl2th_isr_do_to(void)
+static noinline void do_to_step_pl2(void)
+{
+	g.pos_to_p[1].o = (g.pos_to_p[1].o + 1) & STREAM_BUF_MASK;
+	if (g.pos_to_p[1].o == g.pos_to_p[1].i)
+		// done
+		choose_isrs_idle();
+}
+
+static void pl2th_isr_do_to_inc(void)
+{
+	uint32_t isfr, th, v;
+
+	isfr = PL2_ISFR;
+	PL2_ISFR = isfr;
+	th = PL2_TH();
+
+	v = g.stream_to[1][g.pos_to_p[1].o][th];
+	GPIOB_PDOR = PL2_ADJ(v);
+	if (th)
+		do_to_step_pl2();
+}
+
+static void pl2th_isr_do_to_p1d(void)
 {
 	uint32_t isfr, th, v;
 
@@ -182,7 +204,7 @@ static void pl2th_isr_do_to_inc_pl1(void)
 	v = g.stream_to[1][g.pos_to_p[1].o][th];
 	GPIOB_PDOR = PL2_ADJ(v);
 	if (th) {
-		do_to_step();
+		do_to_step_pl1();
 		g.pos_to_p[1].o = g.pos_to_p[0].o;
 	}
 }
@@ -264,16 +286,20 @@ static void choose_isrs(void)
 		switch (g.inc_mode) {
 		case INC_MODE_VSYNC:
 			pl1th_handler = pl1th_isr_do_to;
-			pl2th_handler = pl2th_isr_do_to;
+			pl2th_handler = pl2th_isr_do_to_p1d;
 			vsync_handler = vsync_isr_frameinc;
 			break;
 		case INC_MODE_SHARED_PL1:
 			pl1th_handler = pl1th_isr_do_to_inc;
-			pl2th_handler = pl2th_isr_do_to;
+			pl2th_handler = pl2th_isr_do_to_p1d;
 			break;
 		case INC_MODE_SHARED_PL2:
 			pl1th_handler = pl1th_isr_do_to;
 			pl2th_handler = pl2th_isr_do_to_inc_pl1;
+			break;
+		case INC_MODE_SEPARATE:
+			pl1th_handler = pl1th_isr_do_to_inc;
+			pl2th_handler = pl2th_isr_do_to_inc;
 			break;
 		}
 	}
@@ -287,6 +313,7 @@ static void choose_isrs(void)
 			pl1th_handler = pl1th_isr_fixed_do_from;
 			break;
 		case INC_MODE_SHARED_PL2:
+		case INC_MODE_SEPARATE:
 			/* TODO */
 			break;
 		}
@@ -406,6 +433,7 @@ static void clear_state(void)
 		g.pos_to_p[i].i = g.pos_to_p[i].o = 0;
 	g.pos_from.i = g.pos_from.o = 0;
 	g.frame_cnt = 0;
+	memset(g.stream_to[1], 0x3f, sizeof(g.stream_to[1]));
 	choose_isrs_idle();
 }
 
@@ -595,7 +623,8 @@ int main(void)
 
 		if (g.stream_enable_to && !g.stream_ended) {
 			check_get_data(0);
-			if (g.inc_mode == INC_MODE_SHARED_PL2)
+			if (g.inc_mode == INC_MODE_SHARED_PL2
+			    || g.inc_mode == INC_MODE_SEPARATE)
 				check_get_data(1);
 		}
 

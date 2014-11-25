@@ -34,4 +34,5 @@ enum inc_mode {
 	// shared stream index incremented by pl1 or pl2
 	INC_MODE_SHARED_PL1 = 1,
 	INC_MODE_SHARED_PL2 = 2,
+	INC_MODE_SEPARATE = 3,
 };
