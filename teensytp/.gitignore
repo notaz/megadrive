@@ -1,0 +1,6 @@
+*.o
+*.elf
+*.hex
+.*.swp
+cscope.out
+tags
