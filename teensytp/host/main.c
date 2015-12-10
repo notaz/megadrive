@@ -1,6 +1,7 @@
 /*
- * TeensyTAS, TAS input player for MegaDrive
- * Copyright (c) 2014 notaz
+ * TeensyTP, Team Player/4-Player Adaptor implementation for Teensy3
+ * host part
+ * Copyright (c) 2015 notaz
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -52,7 +53,7 @@ struct teensy_dev {
   } ifaces[2];
 };
 
-/* return 1 if founf, 0 if not, < 0 on error */
+/* return 1 if found, 0 if not, < 0 on error */
 static int find_device(struct teensy_dev *dev,
   uint16_t vendor, uint16_t product)
 {
@@ -313,40 +314,63 @@ static void signal_handler(int sig)
   signal(sig, SIG_DFL);
 }
 
-/* ?0SA 00DU, ?1CB RLDU */
-#define STATE_BYTES 2
-
-static uint8_t fixed_input_state[STATE_BYTES] = { 0x33, 0x3f };
-
+/* MXYZ SACB RLDU */
 enum mdbtn {
-  MDBTN_UP = 1,
-  MDBTN_DOWN,
-  MDBTN_LEFT,
-  MDBTN_RIGHT,
-  MDBTN_A,
-  MDBTN_B,
-  MDBTN_C,
-  MDBTN_START,
+  MDBTN_UP    = (1 <<  0),
+  MDBTN_DOWN  = (1 <<  1),
+  MDBTN_LEFT  = (1 <<  2),
+  MDBTN_RIGHT = (1 <<  3),
+  MDBTN_A     = (1 <<  6),
+  MDBTN_B     = (1 <<  4),
+  MDBTN_C     = (1 <<  5),
+  MDBTN_START = (1 <<  7),
+  MDBTN_X     = (1 << 10),
+  MDBTN_Y     = (1 <<  9),
+  MDBTN_Z     = (1 <<  8),
+  MDBTN_MODE  = (1 << 11),
 };
 
-static const enum mdbtn evdev_md_map[KEY_CNT] = {
+#define BTN_JOY BTN_JOYSTICK
+
+static const uint32_t evdev_md_default_map[KEY_CNT] = {
   [KEY_UP]       = MDBTN_UP,
   [KEY_DOWN]     = MDBTN_DOWN,
   [KEY_LEFT]     = MDBTN_LEFT,
   [KEY_RIGHT]    = MDBTN_RIGHT,
+  [KEY_Z]        = MDBTN_A,
+  [KEY_X]        = MDBTN_B,
+  [KEY_C]        = MDBTN_C,
+  [KEY_A]        = MDBTN_X,
+  [KEY_S]        = MDBTN_Y,
+  [KEY_D]        = MDBTN_Z,
+  [KEY_F]        = MDBTN_MODE,
+  [KEY_ENTER]    = MDBTN_START,
+  // gamepad
+  [BTN_JOY + 0]  = MDBTN_A,
+  [BTN_JOY + 1]  = MDBTN_B,
+  [BTN_JOY + 2]  = MDBTN_C,
+  [BTN_JOY + 3]  = MDBTN_START,
+  // pandora
   [KEY_HOME]     = MDBTN_A,
   [KEY_PAGEDOWN] = MDBTN_B,
   [KEY_END]      = MDBTN_C,
   [KEY_LEFTALT]  = MDBTN_START,
 };
 
-int do_evdev_input(int fd)
+static struct player_state {
+  uint32_t kc_map[KEY_CNT];
+  uint32_t state;
+  int dirty;
+} players[4];
+
+static int do_evdev_input(int fd, unsigned int player_i)
 {
-  uint8_t old_state[STATE_BYTES];
-  uint8_t changed_bits[STATE_BYTES] = { 0, };
+  struct player_state *player;
   struct input_event ev;
-  enum mdbtn mdbtn;
-  int i, ret;
+  uint32_t mask_clear = 0;
+  uint32_t mask_set = 0;
+  uint32_t old_state;
+  int ret;
 
   ret = read(fd, &ev, sizeof(ev));
   if (ret != sizeof(ev)) {
@@ -355,383 +379,109 @@ int do_evdev_input(int fd)
     return 0;
   }
 
-  if (ev.type != EV_KEY)
-    return 0;
-
-  if (ev.value != 0 && ev.value != 1)
-    return 0;
-
-  if ((uint32_t)ev.code >= ARRAY_SIZE(evdev_md_map)) {
-    fprintf(stderr, "evdev read bad key: %u\n", ev.code);
+  if (player_i >= ARRAY_SIZE(players)) {
+    fprintf(stderr, "bad player: %u\n", player_i);
     return 0;
   }
+  player = &players[player_i];
+  old_state = player->state;
 
-  mdbtn = evdev_md_map[ev.code];
-  if (mdbtn == 0)
-    return 0;
+  if (ev.type == EV_ABS) {
+    if (ev.code == 0) {
+      mask_clear = MDBTN_LEFT | MDBTN_RIGHT;
+      if (ev.value < 10)
+        mask_set = MDBTN_LEFT;
+      else if (ev.value > 210)
+        mask_set = MDBTN_RIGHT;
+    }
+    else {
+      mask_clear = MDBTN_UP | MDBTN_DOWN;
+      if (ev.value < 10)
+        mask_set = MDBTN_UP;
+      else if (ev.value > 210)
+        mask_set = MDBTN_DOWN;
+    }
+    printf("abs, s %x %x\n", mask_clear, mask_set);
+  }
+  else if (ev.type == EV_KEY) {
+    if (ev.value != 0 && ev.value != 1)
+      return 0;
 
-  memcpy(old_state, fixed_input_state, STATE_BYTES);
+    if ((uint32_t)ev.code >= ARRAY_SIZE(player->kc_map)) {
+      fprintf(stderr, "evdev read bad key: %u\n", ev.code);
+      return 0;
+    }
 
-  /* ?0SA 00DU, ?1CB RLDU */
-  switch (mdbtn) {
-  case MDBTN_UP:
-    changed_bits[0] = 0x01;
-    changed_bits[1] = 0x01;
-    break;
-  case MDBTN_DOWN:
-    changed_bits[0] = 0x02;
-    changed_bits[1] = 0x02;
-    break;
-  case MDBTN_LEFT:
-    changed_bits[0] = 0x00;
-    changed_bits[1] = 0x04;
-    break;
-  case MDBTN_RIGHT:
-    changed_bits[0] = 0x00;
-    changed_bits[1] = 0x08;
-    break;
-  case MDBTN_A:
-    changed_bits[0] = 0x10;
-    changed_bits[1] = 0x00;
-    break;
-  case MDBTN_B:
-    changed_bits[0] = 0x00;
-    changed_bits[1] = 0x10;
-    break;
-  case MDBTN_C:
-    changed_bits[0] = 0x00;
-    changed_bits[1] = 0x20;
-    break;
-  case MDBTN_START:
-    changed_bits[0] = 0x20;
-    changed_bits[1] = 0x00;
-    break;
+    if (ev.value) // press?
+      mask_set   = player->kc_map[ev.code];
+    else
+      mask_clear = player->kc_map[ev.code];
   }
 
-  if (ev.value) {
-    // key press
-    for (i = 0; i < STATE_BYTES; i++)
-      fixed_input_state[i] &= ~changed_bits[i];
-  }
-  else {
-    // key release
-    for (i = 0; i < STATE_BYTES; i++)
-      fixed_input_state[i] |=  changed_bits[i];
-  }
+  player->state &= ~mask_clear;
+  player->state |=  mask_set;
 
-  return memcmp(old_state, fixed_input_state, STATE_BYTES) ? 1 : 0;
+  player->dirty |= old_state != player->state;
+  return player->dirty;
 }
 
-#define MAX_INPUT_BYTES 2
-
-// TODO: 6btn
-static int tas_data_to_teensy(uint16_t b, uint8_t *data, FILE *logf)
+static int open_evdev(const char *name)
 {
-  uint8_t t;
+  int evdev_support = 0;
+  int fd, ret;
 
-  /* SCBA RLDU */
-  /*     v     */
-  /* ?0SA 00DU, ?1CB RLDU */
-  data[0] = (b & 0x13) | ((b >> 2) & 0x20);
-  data[1] = (b & 0x0f) | ((b >> 1) & 0x30);
-
-  if (logf != NULL) {
-    fwrite(&data[0], 1, 1, logf);
-    t = data[1] | 0x40; // expected TH
-    fwrite(&t, 1, 1, logf);
-  }
-
-  return 2;
-}
-
-struct gmv_tas {
-  char sig[15];
-  char ver;
-  uint32_t rerecord_count;
-  char ctrl1;
-  char ctrl2;
-  uint16_t flags;
-  char name[40];
-  uint8_t data[0][3];
-};
-
-static int import_gmv(FILE *f, long size,
-  uint8_t *out[2], int out_byte_count[2], FILE *logf)
-{
-  struct gmv_tas *gmv;
-  int frame_count;
-  int count = 0;
-  uint16_t val;
-  int ret;
-  int i;
-
-  out_byte_count[0] = out_byte_count[1] = 0;
-
-  if (size < (long)sizeof(*gmv)) {
-    fprintf(stderr, "bad gmv size: %ld\n", size);
-    return -1;
-  }
-
-  gmv = malloc(size);
-  if (gmv == NULL) {
-    fprintf(stderr, "OOM?\n");
-    return -1;
-  }
-  ret = fread(gmv, 1, size, f);
-  if (ret != size) {
-    fprintf(stderr, "fread %d/%ld: ", ret, size);
+  fd = open(name, O_RDONLY);
+  if (fd == -1) {
+    fprintf(stderr, "open %s: ", name);
     perror("");
     return -1;
   }
-
-  frame_count = (size - sizeof(*gmv)) / sizeof(gmv->data[0]);
-
-  /* check the GMV.. */
-  if (frame_count <= 0 || size != sizeof(*gmv) + frame_count * 3) {
-    fprintf(stderr, "broken gmv? frames=%d\n", frame_count);
+  ret = ioctl(fd, EVIOCGBIT(0, sizeof(evdev_support)),
+              &evdev_support);
+  if (ret < 0)
+    perror("EVIOCGBIT");
+  if (!(evdev_support & (1 << EV_KEY))) {
+    fprintf(stderr, "%s doesn't have keys\n", name);
+    close(fd);
     return -1;
   }
 
-  if (strncmp(gmv->sig, "Gens Movie TEST", 15) != 0) {
-    fprintf(stderr, "bad GMV sig\n");
-    return -1;
-  }
-  if (gmv->ctrl1 != '3') {
-    fprintf(stderr, "unhandled controlled config: '%c'\n", gmv->ctrl1);
-    //return -1;
-  }
-  if (gmv->ver >= 'A') {
-    if (gmv->flags & 0x40) {
-      fprintf(stderr, "unhandled flag: movie requires a savestate\n");
-      return -1;
-    }
-    if (gmv->flags & 0x20) {
-      fprintf(stderr, "unhandled flag: 3-player movie\n");
-      return -1;
-    }
-    if (gmv->flags & ~0x80) {
-      //fprintf(stderr, "unhandled flag(s): %04x\n", gmv->flags);
-      //return 1;
-    }
-  }
-  gmv->name[39] = 0;
-  printf("loaded GMV: %s\n", gmv->name);
-  printf("%d frames, %u rerecords\n",
-         frame_count, gmv->rerecord_count);
+  return fd;
+}
 
-  out[0] = malloc(frame_count * MAX_INPUT_BYTES);
-  if (out[0] == NULL) {
-    fprintf(stderr, "OOM?\n");
-    return -1;
+static void do_stdin_input(uint32_t *mode, int *changed)
+{
+  char c = 0;
+  int ret;
+
+  ret = read(STDIN_FILENO, &c, 1);
+  if (ret <= 0) {
+    perror("read stdin");
+    return;
   }
 
-  for (i = 0; i < frame_count; i++) {
-    val = gmv->data[i][0] | ((gmv->data[i][2] & 0x0f) << 8);
-    count += tas_data_to_teensy(val, out[0] + count, logf);
-
-    if (gmv->data[i][1] != 0xff || gmv->data[i][2] != 0xff)
-    {
-      fprintf(stderr, "f %d: unhandled byte(s) %02x %02x\n",
-        i, gmv->data[i][1], gmv->data[i][2]);
-    }
+  switch (c) {
+  case '1':
+    printf("3btn mode\n");
+    *mode = OP_MODE_3BTN;
+    *changed = 1;
+    break;
+  case '2':
+    printf("6btn mode\n");
+    *mode = OP_MODE_6BTN;
+    *changed = 1;
+    break;
+  case '3':
+    printf("teamplayer mode\n");
+    *mode = OP_MODE_TEAMPLAYER;
+    *changed = 1;
+    break;
   }
+}
 
-  out_byte_count[0] = count;
+static int parse_binds(unsigned int player_i, const char *binds)
+{
   return 0;
-}
-
-static int do_bkm_char(char c, char expect, uint16_t *val, int bit)
-{
-  if (c == expect) {
-    *val &= ~(1 << bit);
-    return 0;
-  }
-  if (c == '.')
-    return 0;
-
-  fprintf(stderr, "unexpected bkm char: '%c' instead of '%c'\n",
-          c, expect);
-  return 1;
-}
-
-static int import_bkm(FILE *f, uint8_t *out[2], int out_byte_count[2],
-  FILE *logf)
-{
-  int teensy_bytes = 0;
-  int have_pl2 = 0;
-  int have_xyz = 0;
-  int frames = 0;
-  int count = 0;
-  int alloc = 0;
-  int line = 0;
-  char buf[256];
-  const char *r;
-  uint16_t val;
-  char *p;
-  int pl, i;
-
-  while ((p = fgets(buf, sizeof(buf), f)) != NULL)
-  {
-    line++;
-    if (p[0] != '|')
-      continue;
-
-    if (strlen(p) < 30)
-      goto unhandled_line;
-    if (p[30] != '\r' && p[30] != '\n')
-      goto unhandled_line;
-    p[30] = 0;
-
-    if (count >= alloc - MAX_INPUT_BYTES) {
-      alloc = alloc * 2 + 64;
-      for (pl = 0; pl < 2; pl++) {
-        out[pl] = realloc(out[pl], alloc * sizeof(out[0][0]));
-        if (out[pl] == NULL) {
-          fprintf(stderr, "OOM?\n");
-          return -1;
-        }
-      }
-    }
-
-    if (strncmp(p, "|.|", 3) != 0)
-      goto unhandled_line;
-    p += 3;
-
-    for (pl = 0; pl < 2; pl++) {
-      static const char ref[] = "UDLRABCSXYZM";
-
-      val = 0xfff;
-      for (r = ref, i = 0; *r != 0; p++, r++, i++) {
-        if (do_bkm_char(*p, *r, &val, i))
-          goto unhandled_line;
-      }
-
-      if (*p++ != '|')
-        goto unhandled_line;
-
-      teensy_bytes = tas_data_to_teensy(val, out[pl] + count, logf);
-
-      if ((val & 0xf00) != 0xf00)
-        have_xyz = 1;
-      if (pl == 1)
-        have_pl2 |= (val != 0xfff);
-    }
-    count += teensy_bytes;
-
-    if (strcmp(p, "|") != 0)
-      goto unhandled_line;
-
-    frames++;
-    continue;
-
-unhandled_line:
-    fprintf(stderr, "unhandled bkm line %d: '%s'\n", line, buf);
-    return -1;
-  }
-
-  printf("loaded bkm, %d players, %d frames, %d bytes, have_xyz=%d\n",
-    have_pl2 ? 2 : 1, frames, count, have_xyz);
-  out_byte_count[0] = count;
-  if (have_pl2)
-    out_byte_count[1] = count;
-  else {
-    free(out[1]);
-    out[1] = NULL;
-  }
-
-  return 0;
-}
-
-static int import_raw(FILE *f, uint8_t **out, int *out_byte_count,
-  FILE *logf)
-{
-  int count = 0;
-  int alloc = 0;
-  int line = 0;
-  int first = 1;
-  char buf[256];
-  uint8_t val;
-  char *p;
-  int i;
-
-  *out_byte_count = 0;
-
-  while ((p = fgets(buf, sizeof(buf), f)) != NULL)
-  {
-    line++;
-    if (p[0] == '#')
-      continue;
-    if (p[0] != 'e') {
-      printf("skipping: %s", p);
-      continue;
-    }
-
-    val = 0;
-    p++;
-    for (i = 6; i >= 0; i--, p++) {
-      if (*p != '0' && *p != '1')
-        goto bad;
-      if (*p == '1')
-        val |= 1 << i;
-    }
-    if (*p != ' ')
-      goto bad;
-
-    if (first && (val & 0x40))
-      continue; // XXX..
-    first = 0;
-
-    if (count >= alloc) {
-      alloc = alloc * 2 + 64;
-      *out = realloc(*out, alloc * sizeof((*out)[0]));
-      if (*out == NULL) {
-        fprintf(stderr, "OOM?\n");
-        return -1;
-      }
-    }
-
-    if (logf)
-      fwrite(&val, 1, 1, logf);
-
-    (*out)[count++] = val & 0x3f;
-    continue;
-
-bad:
-    fprintf(stderr, "bad raw line %d: '%s'\n", line, buf);
-    return -1;
-  }
-
-  printf("loaded raw, %d bytes\n", count);
-  *out_byte_count = count;
-  return 0;
-}
-
-static int write_bkm_frame(FILE *f, const uint8_t *data)
-{
-  /* ?0SA 00DU, ?1CB RLDU */
-  static const char ref[]  = "UDLRABCSXYZM";
-  static const char bits[] = { 0,1,2,3, 12,4,5,13, 16,16,16,16 };
-  uint32_t idata[2];
-  int p, i;
-
-  if (f == NULL) {
-    fprintf(stderr, "%s called without outfile\n", __func__);
-    goto out;
-  }
-
-  idata[0] = 0x10000 | (data[0] << 8) | data[1];
-  idata[1] = ~0;
-
-  fprintf(f, "|.|");
-  for (p = 0; p < 2; p++) {
-    for (i = 0; i < 12; i++)
-      fprintf(f, "%c", (idata[p] & (1 << bits[i])) ? '.' : ref[i]);
-    fprintf(f, "|");
-  }
-  fprintf(f, "|\n");
-
-out:
-  return 2;
 }
 
 static int submit_urb(int fd, struct usbdevfs_urb *urb, int ep,
@@ -753,10 +503,20 @@ enum my_urbs {
   URB_CNT
 };
 
-static void missing_arg(int a)
+static void usage(const char *argv0)
 {
-  fprintf(stderr, "missing arg: %d\n", a);
+  fprintf(stderr, "usage:\n%s <-e player /dev/input/node>*\n"
+    "  [-b <player> <keycode=mdbtn>[,keycode=mdbtn]]\n"
+    "  [-m <mode>]\n\n"
+    "  mdbtn: int 0-11: UDLR ABCS XYZM)\n"
+    "  mode:  int 0-2: 3btn 6btn teamplayer\n", argv0);
   exit(1);
+}
+
+static void bad_arg(char *argv[], int a)
+{
+  fprintf(stderr, "bad arg %d: '%s'\n", a, argv[a]);
+  usage(argv[0]);
 }
 
 int main(int argc, char *argv[])
@@ -764,190 +524,77 @@ int main(int argc, char *argv[])
   struct teensy_dev dev;
   struct usbdevfs_urb urb[URB_CNT];
   struct usbdevfs_urb *reaped_urb;
-  int fixed_input_changed = 0;
+  uint32_t evdev_players[16];
   int evdev_fds[16];
   int evdev_fd_cnt = 0;
-  int evdev_support;
   int wait_device = 0;
   int pending_urbs = 0;
+  int had_input = 0;
   fd_set rfds, wfds;
-  const char *tasfn = NULL;
-  const char *tasfn_p2 = NULL;
-  const char *outfn = NULL;
-  const char *logfn = NULL;
-  uint8_t *tas_data[2] = { NULL, NULL };
-  int tas_data_size[2] = { 0, 0 };
-  int bytes_sent[2] = { 0, 0 };
-  int use_vsync = 0; // frame increment on vsync
-  int separate_2p = 0;
-  int no_start_seq = 0;
-  int enable_sent = 0;
-  int abort_sent = 0;
-  int frame_count = 0;
+  int mode_changed = 0;
   char buf_dbg[64 + 1];
-  struct tas_pkt pkt_in;
-  struct tas_pkt pkt_out;
+  struct tp_pkt pkt_in;
+  struct tp_pkt pkt_out;
   struct timeval *timeout = NULL;
   struct timeval tout;
-  FILE *outf = NULL;
-  FILE *logf = NULL;
+  uint32_t mode = OP_MODE_3BTN;
+  uint32_t player;
   int i, ret = -1;
   int fd;
+
+  for (i = 0; i < ARRAY_SIZE(players); i++)
+    memcpy(&players[i].kc_map, evdev_md_default_map,
+           sizeof(players[i].kc_map));
 
   for (i = 1; i < argc; i++) {
     if (argv[i][0] == '-') {
       switch (argv[i][1] | (argv[i][2] << 8)) {
+      case 'e':
+        if (argv[++i] == NULL)
+          bad_arg(argv, i);
+        player = strtoul(argv[i], NULL, 0);
+        if (player >= ARRAY_SIZE(players))
+          bad_arg(argv, i);
+
+        if (argv[++i] == NULL)
+          bad_arg(argv, i);
+        fd = open_evdev(argv[i]);
+        if (fd == -1)
+          bad_arg(argv, i);
+        if (evdev_fd_cnt >= ARRAY_SIZE(evdev_fds)) {
+          fprintf(stderr, "too many evdevs\n");
+          break;
+        }
+        evdev_players[evdev_fd_cnt] = player;
+        evdev_fds[evdev_fd_cnt] = fd;
+        evdev_fd_cnt++;
+        continue;
+      case 'b':
+        if (argv[++i] == NULL)
+          bad_arg(argv, i);
+        player = strtoul(argv[i], NULL, 0);
+        if (player >= ARRAY_SIZE(players))
+          bad_arg(argv, i);
+
+        if (argv[++i] == NULL)
+          bad_arg(argv, i);
+        ret = parse_binds(player, argv[i]);
+        if (ret != 0)
+          bad_arg(argv, i);
+        continue;
       case 'm':
-        i++;
-        if (argv[i] == NULL)
-          missing_arg(i);
-        tasfn = argv[i];
+        if (argv[++i] == NULL)
+          bad_arg(argv, i);
+        mode = strtoul(argv[i], NULL, 0);
+        mode_changed = 1;
         continue;
-      case '2':
-        i++;
-        if (argv[i] == NULL)
-          missing_arg(i);
-        tasfn_p2 = argv[i];
-        continue;
-      case 'w':
-        i++;
-        if (argv[i] == NULL)
-          missing_arg(i);
-        outfn = argv[i];
-        continue;
-      case 'l':
-        i++;
-        if (argv[i] == NULL)
-          missing_arg(i);
-        logfn = argv[i];
-        continue;
-      case 'v':
-        use_vsync = 1;
-        continue;
-      case 'n':
-        no_start_seq = 1;
-        continue;
-      default:
-        fprintf(stderr, "bad arg: %s\n", argv[i]);
-        return 1;
       }
     }
-
-    /* remaining args are evdev filenames */
-    if (evdev_fd_cnt >= ARRAY_SIZE(evdev_fds)) {
-      fprintf(stderr, "too many evdevs\n");
-      break;
-    }
-    fd = open(argv[i], O_RDONLY);
-    if (fd == -1) {
-      fprintf(stderr, "open %s: ", argv[i]);
-      perror("");
-      continue;
-    }
-    evdev_support = 0;
-    ret = ioctl(fd, EVIOCGBIT(0, sizeof(evdev_support)),
-                &evdev_support);
-    if (ret < 0)
-      perror("EVIOCGBIT");
-    if (!(evdev_support & (1 << EV_KEY))) {
-      fprintf(stderr, "%s doesn't have keys\n", argv[i]);
-      close(fd);
-      continue;
-    }
-    evdev_fds[evdev_fd_cnt++] = fd;
+    bad_arg(argv, i);
   }
 
-  if (logfn != NULL) {
-    logf = fopen(logfn, "wb");
-    if (logf == NULL) {
-      fprintf(stderr, "fopen %s: ", logfn);
-      perror("");
-      return 1;
-    }
-  }
-
-  if (tasfn != NULL) {
-    FILE *f, *f_p2 = NULL;
-    const char *ext;
-    long size;
-
-    f = fopen(tasfn, "rb");
-    if (f == NULL) {
-      fprintf(stderr, "fopen %s: ", tasfn);
-      perror("");
-      return 1;
-    }
-
-    if (tasfn_p2 != NULL) {
-      f_p2 = fopen(tasfn_p2, "rb");
-      if (f_p2 == NULL) {
-        fprintf(stderr, "fopen %s: ", tasfn_p2);
-        perror("");
-        return 1;
-      }
-    }
-
-    fseek(f, 0, SEEK_END);
-    size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (size <= 0) {
-      fprintf(stderr, "bad size: %ld\n", size);
-      return 1;
-    }
-
-    ext = strrchr(tasfn, '.');
-    if (ext == NULL)
-      ext = tasfn;
-    else
-      ext++;
-
-    if (strcasecmp(ext, "gmv") == 0)
-      ret = import_gmv(f, size, tas_data, tas_data_size, logf);
-    else if (strcasecmp(ext, "bkm") == 0)
-      ret = import_bkm(f, tas_data, tas_data_size, logf);
-    else if (strcasecmp(ext, "txt") == 0)
-      ret = import_raw(f, &tas_data[0], &tas_data_size[0], logf);
-    else {
-      fprintf(stderr, "unknown movie type: '%s'\n", ext);
-      return 1;
-    }
-    fclose(f);
-
-    if (ret != 0 || tas_data[0] == NULL || tas_data_size[0] <= 0) {
-      fprintf(stderr, "failed fo parse %s\n", tasfn);
-      return 1;
-    }
-
-    // separate file with p2 input?
-    if (f_p2 != NULL) {
-      ret = import_raw(f_p2, &tas_data[1], &tas_data_size[1], NULL);
-      if (ret != 0 || tas_data[1] == NULL || tas_data_size[1] <= 0) {
-        fprintf(stderr, "failed fo parse %s\n", tasfn_p2);
-        return 1;
-      }
-      fclose(f_p2);
-      separate_2p = 1;
-    }
-
-    if (logf != NULL) {
-      fclose(logf);
-      logf = NULL;
-    }
-
-    if (tas_data_size[1] != 0 && tas_data[1] == NULL) {
-      fprintf(stderr, "missing tas_data[1]\n");
-      return 1;
-    }
-  }
-
-  if (outfn != NULL) {
-    outf = fopen(outfn, "w");
-    if (outf == NULL) {
-      fprintf(stderr, "fopen %s: ", outfn);
-      perror("");
-      return 1;
-    }
-  }
+  if (evdev_fd_cnt == 0)
+    usage(argv[0]);
 
   enable_echo(0);
   signal(SIGINT, signal_handler);
@@ -963,7 +610,7 @@ int main(int argc, char *argv[])
 
       if (ret == 0) {
         if (!wait_device) {
-          printf("waiting for device..\n");
+          printf("waiting for device...\n");
           wait_device = 1;
         }
         usleep(250000);
@@ -972,12 +619,9 @@ int main(int argc, char *argv[])
 
       wait_device = 0;
       pending_urbs = 0;
-      enable_sent = 0;
-      bytes_sent[0] = 0;
-      bytes_sent[1] = 0;
 
       /* we wait first, then send commands, but if teensy
-       * is started already, it won't send anything */
+       * is started already, it won't send anything back */
       tout.tv_sec = 1;
       tout.tv_usec = 0;
       timeout = &tout;
@@ -1020,28 +664,24 @@ int main(int argc, char *argv[])
     }
     timeout = NULL;
 
-    /* sometihng form stdin? */
-    if (FD_ISSET(STDIN_FILENO, &rfds)) {
-      char c = 0;
-      ret = read(STDIN_FILENO, &c, 1);
-      if (ret <= 0) {
-        perror("read stdin");
-        break;
-      }
-
-      switch (c) {
-      case 'r':
-        enable_sent = 0;
-        break;
-      }
-    }
+    /* something form stdin? */
+    if (FD_ISSET(STDIN_FILENO, &rfds))
+      do_stdin_input(&mode, &mode_changed);
 
     /* something from input devices? */
+    had_input = 0;
     for (i = 0; i < evdev_fd_cnt; i++) {
       if (FD_ISSET(evdev_fds[i], &rfds)) {
-        fixed_input_changed |=
-          do_evdev_input(evdev_fds[i]);
+        do_evdev_input(evdev_fds[i], evdev_players[i]);
+        had_input = 1;
       }
+    }
+    if (had_input) {
+      /* collect any other input changes before starting
+       * the slow USB transfer */
+      tout.tv_sec = tout.tv_usec = 0;
+      timeout = &tout;
+      continue;
     }
 
     /* something from USB? */
@@ -1077,53 +717,8 @@ int main(int argc, char *argv[])
       }
       else if (reaped_urb == &urb[URB_DATA_IN])
       {
-        int p;
-
         /* some request from teensy */
-        switch (pkt_in.type) {
-        case PKT_STREAM_REQ:
-          p = pkt_in.req.is_p2 ? 1 : 0;
-          printf("req%d: %d/%d/%d\n", pkt_in.req.is_p2,
-            pkt_in.req.frame * 2, bytes_sent[p], tas_data_size[p]);
-
-          pkt_out.size = 0;
-          if (bytes_sent[p] < tas_data_size[p]) {
-            pkt_out.type = p ? PKT_STREAM_DATA_TO_P2
-                             : PKT_STREAM_DATA_TO_P1;
-
-            i = tas_data_size[p] - bytes_sent[p];
-            if (i > sizeof(pkt_out.data))
-              i = sizeof(pkt_out.data);
-            memcpy(pkt_out.data, tas_data[p] + bytes_sent[p], i);
-            bytes_sent[p] += i;
-            pkt_out.size = i;
-          }
-          else {
-            pkt_out.type = PKT_STREAM_END;
-          }
-
-          ret = submit_urb(dev.fd, &urb[URB_DATA_OUT],
-                  dev.ifaces[0].ep_out, &pkt_out, sizeof(pkt_out));
-          if (ret != 0)
-            perror("USBDEVFS_SUBMITURB PKT_STREAM_DATA_TO");
-          break;
-
-        case PKT_STREAM_DATA_FROM:
-          printf("f: %d\n", frame_count);
-          if (pkt_in.size == 0 || pkt_in.size > sizeof(pkt_out.data)) {
-            printf("host: got bad DATA_FROM size: %u\n", pkt_in.size);
-            break;
-          }
-          for (i = 0; i < pkt_in.size; ) {
-            i += write_bkm_frame(outf, pkt_in.data + i);
-            frame_count++;
-          }
-          break;
-
-        default:
-          printf("host: got unknown pkt type: %04x\n", pkt_in.type);
-          break;
-        }
+        printf("rx data?\n");
       }
       else if (reaped_urb == &urb[URB_DATA_OUT])
       {
@@ -1148,23 +743,13 @@ int main(int argc, char *argv[])
 
     /* something to send? */
     if (pending_urbs & (1 << URB_DATA_OUT))
-      // can't do that yet
+      // can't do that yet - out urb still busy
       continue;
 
-    if ((tas_data[0] != NULL || outf != NULL) && !enable_sent) {
+    if (mode_changed) {
       memset(&pkt_out, 0, sizeof(pkt_out));
-      pkt_out.type = PKT_STREAM_ENABLE;
-      pkt_out.enable.stream_to = (tas_data[0] != NULL);
-      pkt_out.enable.stream_from = (outf != NULL);
-      pkt_out.enable.no_start_seq = no_start_seq;
-      if (use_vsync)
-        pkt_out.enable.inc_mode = INC_MODE_VSYNC;
-      else if (tas_data_size[1] != 0 && separate_2p)
-        pkt_out.enable.inc_mode = INC_MODE_SEPARATE;
-      else if (tas_data_size[1] != 0)
-        pkt_out.enable.inc_mode = INC_MODE_SHARED_PL2;
-      else
-        pkt_out.enable.inc_mode = INC_MODE_SHARED_PL1;
+      pkt_out.type = PKT_UPD_MODE;
+      pkt_out.mode = mode;
 
       ret = submit_urb(dev.fd, &urb[URB_DATA_OUT], dev.ifaces[0].ep_out,
                        &pkt_out, sizeof(pkt_out));
@@ -1173,15 +758,21 @@ int main(int argc, char *argv[])
         continue;
       }
       pending_urbs |= 1 << URB_DATA_OUT;
-      enable_sent = 1;
-      bytes_sent[0] = 0;
-      bytes_sent[1] = 0;
+      mode_changed = 0;
       continue;
     }
-    if (tas_data[0] == NULL && fixed_input_changed) {
-      memset(&pkt_out, 0, sizeof(pkt_out));
-      pkt_out.type = PKT_FIXED_STATE;
-      memcpy(pkt_out.data, fixed_input_state, sizeof(fixed_input_state));
+
+    /* send buttons if there were any changes */
+    memset(&pkt_out, 0, sizeof(pkt_out));
+    for (i = 0; i < ARRAY_SIZE(players); i++) {
+      if (players[i].dirty)
+        pkt_out.changed_players |= 1 << i;
+      players[i].dirty = 0;
+
+      pkt_out.bnts[i] = players[i].state;
+    }
+    if (pkt_out.changed_players != 0) {
+      pkt_out.type = PKT_UPD_BTNS;
 
       ret = submit_urb(dev.fd, &urb[URB_DATA_OUT], dev.ifaces[0].ep_out,
                        &pkt_out, sizeof(pkt_out));
@@ -1189,22 +780,7 @@ int main(int argc, char *argv[])
         perror("USBDEVFS_SUBMITURB PKT_FIXED_STATE");
         break;
       }
-      fixed_input_changed = 0;
       pending_urbs |= 1 << URB_DATA_OUT;
-      continue;
-    }
-    if (g_exit && !abort_sent) {
-      memset(&pkt_out, 0, sizeof(pkt_out));
-      pkt_out.type = PKT_STREAM_ABORT;
-
-      ret = submit_urb(dev.fd, &urb[URB_DATA_OUT], dev.ifaces[0].ep_out,
-                       &pkt_out, sizeof(pkt_out));
-      if (ret != 0) {
-        perror("USBDEVFS_SUBMITURB PKT_STREAM_ABORT");
-        break;
-      }
-      pending_urbs |= 1 << URB_DATA_OUT;
-      abort_sent = 1;
       continue;
     }
 
@@ -1216,9 +792,6 @@ dev_close:
   }
 
   enable_echo(1);
-
-  if (outf != NULL)
-    fclose(outf);
 
   if (dev.fd != -1) {
     /* deal with pending URBs */

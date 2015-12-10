@@ -1,6 +1,7 @@
 /*
- * TeensyTAS, TAS input player for MegaDrive
- * Copyright (c) 2014 notaz
+ * TeensyTP, Team Player/4-Player Adaptor implementation for Teensy3
+ * using a host machine with USB hub
+ * Copyright (c) 2015 notaz
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -33,41 +34,7 @@
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
-#define noinline __attribute__((noinline))
-
-// use power of 2
-#define STREAM_BUF_SIZE 512
-#define STREAM_BUF_MASK (512 - 1)
-
-/* ?0SA 00DU, ?1CB RLDU */
-#define STREAM_EL_SZ 2
-
-static struct {
-	uint8_t stream_to[2][STREAM_BUF_SIZE][STREAM_EL_SZ];
-	uint8_t stream_from[STREAM_BUF_SIZE][STREAM_EL_SZ];
-	struct {
-		union {
-			uint8_t fixed_state[4];
-			uint32_t fixed_state32;
-		};
-		union {
-			uint8_t pending_state[4];
-			uint32_t pending_state32;
-		};
-	} pl[2];
-	uint32_t stream_enable_to:1;
-	uint32_t stream_enable_from:1;
-	uint32_t stream_started:1;
-	uint32_t stream_ended:1;
-	uint32_t inc_mode:2;
-	uint32_t use_pending:1;
-	uint32_t frame_cnt;
-	uint32_t edge_cnt;
-	struct {
-		uint32_t i;
-		uint32_t o;
-	} pos_to_p[2], pos_from;
-} g;
+#define noinline __attribute__((noclone,noinline))
 
 ssize_t _write(int fd, const void *buf, size_t nbyte)
 {
@@ -87,57 +54,75 @@ void yield(void)
 {
 }
 
-static noinline void choose_isrs_idle(void);
+/*
+ * 00157:231: w 70 @ 007ef2
+ * 00157:231: r 7f @ 007f06
+ * 00157:231: w 30 @ 007efa
+ * 00157:231: r 33 @ 007f06
+ * 00157:232: w 40 @ 007f6a
+ * 00157:232: r 7f @ 007f70
+ */
+
+/* ?0SA 00DU, ?1CB RLDU */
+
+static struct {
+	union {
+		uint16_t hw;
+		uint8_t b[2];
+	} btn3_state[2];
+	//uint8_t btn6_state[2][4];
+	uint8_t tp_state[16];
+
+	uint32_t cnt;
+	uint32_t mode;
+	uint32_t pl1th:1;
+} g;
 
 /* player1 TH */
-#define PL1_ISFR   PORTD_ISFR
-#define PL1_TH()   ((CORE_PIN21_PINREG >> CORE_PIN21_BIT) & 1)
+#define PL1_ISFR     PORTD_ISFR
+#define PL1_TH()     ((CORE_PIN21_PINREG >> CORE_PIN21_BIT) & 1)
+#define PL1_TR()     ((CORE_PIN20_PINREG >> CORE_PIN20_BIT) & 1)
+#define PL1_TH_MASK  CORE_PIN21_BITMASK
+#define PL1_TR_MASK  CORE_PIN20_BITMASK
 
-static void pl1th_isr_fixed(void)
+static void pl1_isr_3btn(void)
 {
-	uint32_t isfr, th;
+	uint32_t isfr;
 
 	isfr = PL1_ISFR;
 	PL1_ISFR = isfr;
+
+	GPIOD_PDOR = g.btn3_state[0].b[PL1_TH()];
+}
+
+static noinline void pl1_isr_tp_do_th(void)
+{
+	uint32_t cnt, th;
+
 	th = PL1_TH();
+	cnt = !th;
 
-	GPIOD_PDOR = g.pl[0].fixed_state[th];
-	g.edge_cnt++;
+	GPIOD_PDOR = g.tp_state[cnt] | (PL1_TR() << 4);
+	g.cnt = cnt;
+	g.pl1th = th;
 }
 
-static noinline void do_to_step_pl1(void)
+static void pl1_isr_tp(void)
 {
-	g.frame_cnt++;
-
-	g.pos_to_p[0].o = (g.pos_to_p[0].o + 1) & STREAM_BUF_MASK;
-	if (g.pos_to_p[0].o == g.pos_to_p[0].i)
-		// done
-		choose_isrs_idle();
-}
-
-static void pl1th_isr_do_to_inc(void)
-{
-	uint32_t isfr, th;
+	uint32_t isfr;
 
 	isfr = PL1_ISFR;
 	PL1_ISFR = isfr;
-	th = PL1_TH();
 
-	GPIOD_PDOR = g.stream_to[0][g.pos_to_p[0].o][th];
-	if (th)
-		do_to_step_pl1();
-}
+	if (isfr & PL1_TH_MASK)
+		pl1_isr_tp_do_th();
+	if (!(isfr & PL1_TR_MASK))
+		return;
+	if (g.pl1th)
+		return;
 
-static void pl1th_isr_do_to(void)
-{
-	uint32_t isfr, th;
-
-	isfr = PL1_ISFR;
-	PL1_ISFR = isfr;
-	th = PL1_TH();
-
-	GPIOD_PDOR = g.stream_to[0][g.pos_to_p[0].o][th];
-	g.edge_cnt++;
+	g.cnt++;
+	GPIOD_PDOR = g.tp_state[g.cnt & 0x0f] | (PL1_TR() << 4);
 }
 
 /* player2 TH */
@@ -145,362 +130,118 @@ static void pl1th_isr_do_to(void)
 #define PL2_TH()   ((CORE_PIN15_PINREG >> CORE_PIN15_BIT) & 1)
 #define PL2_ADJ(x) ((x) | ((x) << 12))
 
-static void pl2th_isr_fixed(void)
-{
-	uint32_t isfr, th, v;
-
-	isfr = PL2_ISFR;
-	PL2_ISFR = isfr;
-	th = PL2_TH();
-
-	v = g.pl[1].fixed_state[th];
-	GPIOB_PDOR = PL2_ADJ(v);
-}
-
-static noinline void do_to_step_pl2(void)
-{
-	g.pos_to_p[1].o = (g.pos_to_p[1].o + 1) & STREAM_BUF_MASK;
-	if (g.pos_to_p[1].o == g.pos_to_p[1].i)
-		// done
-		choose_isrs_idle();
-}
-
-static void pl2th_isr_do_to_inc(void)
-{
-	uint32_t isfr, th, v;
-
-	isfr = PL2_ISFR;
-	PL2_ISFR = isfr;
-	th = PL2_TH();
-
-	v = g.stream_to[1][g.pos_to_p[1].o][th];
-	GPIOB_PDOR = PL2_ADJ(v);
-	if (th)
-		do_to_step_pl2();
-}
-
-static void pl2th_isr_do_to_p1d(void)
-{
-	uint32_t isfr, th, v;
-
-	isfr = PL2_ISFR;
-	PL2_ISFR = isfr;
-	th = PL2_TH();
-
-	v = g.stream_to[1][g.pos_to_p[0].o][th];
-	GPIOB_PDOR = PL2_ADJ(v);
-
-	g.pos_to_p[1].o = g.pos_to_p[0].o;
-}
-
-static void pl2th_isr_do_to_inc_pl1(void)
-{
-	uint32_t isfr, th, v;
-
-	isfr = PL2_ISFR;
-	PL2_ISFR = isfr;
-	th = PL2_TH();
-
-	v = g.stream_to[1][g.pos_to_p[1].o][th];
-	GPIOB_PDOR = PL2_ADJ(v);
-	if (th) {
-		do_to_step_pl1();
-		g.pos_to_p[1].o = g.pos_to_p[0].o;
-	}
-}
-
-/* vsync handler */
-#define VSYNC_ISFR PORTC_ISFR
-
-static void vsync_isr_nop(void)
+static void pl2_isr_nop(void)
 {
 	uint32_t isfr;
 
-	isfr = VSYNC_ISFR;
-	VSYNC_ISFR = isfr;
-}
+	isfr = PL2_ISFR;
+	PL2_ISFR = isfr;
 
-// /vsync starts at line 235/259 (ntsc/pal), just as vcounter jumps back
-// we care when it comes out (/vsync goes high) after 3 lines at 238/262
-static void vsync_isr_frameinc(void)
-{
-	uint32_t isfr;
-
-	isfr = VSYNC_ISFR;
-	VSYNC_ISFR = isfr;
-
-	g.pos_to_p[0].o = (g.pos_to_p[0].o + 1) & STREAM_BUF_MASK;
-	g.pos_to_p[1].o = g.pos_to_p[0].o;
-
-	if (g.pos_to_p[0].o == g.pos_to_p[0].i)
-		choose_isrs_idle();
-	g.frame_cnt++;
-}
-
-/* "recording" data */
-static noinline void do_from_step(void)
-{
-	uint32_t s;
-
-	// should hopefully give atomic fixed_state read..
-	s = g.pl[0].fixed_state32;
-	g.pl[0].fixed_state32 = g.pl[0].pending_state32;
-	g.stream_from[g.pos_from.i][0] = s;
-	g.stream_from[g.pos_from.i][1] = s >> 8;
-	g.pos_from.i = (g.pos_from.i + 1) & STREAM_BUF_MASK;
-}
-
-static void pl1th_isr_fixed_do_from(void)
-{
-	uint32_t isfr, th;
-
-	isfr = PL1_ISFR;
-	PL1_ISFR = isfr;
-	th = PL1_TH();
-
-	GPIOD_PDOR = g.pl[0].fixed_state[th];
-	if (th)
-		do_from_step();
-	g.edge_cnt++;
-}
-
-static void vsync_isr_frameinc_do_from(void)
-{
-	uint32_t isfr;
-
-	isfr = VSYNC_ISFR;
-	VSYNC_ISFR = isfr;
-
-	do_from_step();
-	g.frame_cnt++;
+	//GPIOB_PDOR = PL2_ADJ(v);
 }
 
 /* * */
-static void choose_isrs(void)
+static void clear_state()
 {
-	void (*pl1th_handler)(void) = pl1th_isr_fixed;
-	void (*pl2th_handler)(void) = pl2th_isr_fixed;
-	void (*vsync_handler)(void) = vsync_isr_nop;
+	int p, i;
 
-	if (g.stream_enable_to) {
-		switch (g.inc_mode) {
-		case INC_MODE_VSYNC:
-			pl1th_handler = pl1th_isr_do_to;
-			pl2th_handler = pl2th_isr_do_to_p1d;
-			vsync_handler = vsync_isr_frameinc;
-			break;
-		case INC_MODE_SHARED_PL1:
-			pl1th_handler = pl1th_isr_do_to_inc;
-			pl2th_handler = pl2th_isr_do_to_p1d;
-			break;
-		case INC_MODE_SHARED_PL2:
-			pl1th_handler = pl1th_isr_do_to;
-			pl2th_handler = pl2th_isr_do_to_inc_pl1;
-			break;
-		case INC_MODE_SEPARATE:
-			pl1th_handler = pl1th_isr_do_to_inc;
-			pl2th_handler = pl2th_isr_do_to_inc;
-			break;
-		}
-	}
-	else if (g.stream_enable_from) {
-		g.use_pending = 1;
-		switch (g.inc_mode) {
-		case INC_MODE_VSYNC:
-			vsync_handler = vsync_isr_frameinc_do_from;
-			break;
-		case INC_MODE_SHARED_PL1:
-			pl1th_handler = pl1th_isr_fixed_do_from;
-			break;
-		case INC_MODE_SHARED_PL2:
-		case INC_MODE_SEPARATE:
-			/* TODO */
-			break;
-		}
+	// no hw connected
+	for (p = 0; p < 2; p++) {
+		for (i = 0; i < 2; i++)
+			g.btn3_state[p].b[i] = 0x3f;
+		//for (i = 0; i < 4; i++)
+		//	g.btn6_state[p][i] = 0x3f;
 	}
 
-	attachInterruptVector(IRQ_PORTD, pl1th_handler);
-	attachInterruptVector(IRQ_PORTC, pl2th_handler);
-	attachInterruptVector(IRQ_PORTA, vsync_handler);
+	// 4 pads, nothing pressed
+	g.tp_state[0] = 0x03;
+	g.tp_state[1] = 0x0f;
+	g.tp_state[2] = 0x00;
+	g.tp_state[3] = 0x00;
+	for (i = 4; i < 8; i++)
+		g.tp_state[i] = 0x00; // 3btn
+	for (; i < 16; i++)
+		g.tp_state[i] = 0x0f;
+
+	g.cnt = 0;
+	g.pl1th = PL1_TH();
 }
 
-static noinline void choose_isrs_idle(void)
+static void switch_mode(int mode)
 {
-	attachInterruptVector(IRQ_PORTD, pl1th_isr_fixed);
-	attachInterruptVector(IRQ_PORTC, pl2th_isr_fixed);
-	attachInterruptVector(IRQ_PORTA, vsync_isr_nop);
+	void (*pl1_handler)(void) = pl1_isr_3btn;
+	void (*pl2_handler)(void) = pl2_isr_nop;
+
+	clear_state();
+
+	switch (mode) {
+	default:
+	case OP_MODE_3BTN:
+	case OP_MODE_6BTN:
+		pinMode(20, OUTPUT);
+		break;
+	case OP_MODE_TEAMPLAYER:
+		pinMode(20, INPUT);
+		attachInterrupt(20, pl1_handler, CHANGE);
+		pl1_handler = pl1_isr_tp;
+		pl2_handler = pl2_isr_nop;
+		GPIOB_PDOR = PL2_ADJ(0x3f);
+		break;
+	}
+
+	attachInterruptVector(IRQ_PORTD, pl1_handler);
+	attachInterruptVector(IRQ_PORTC, pl2_handler);
+	g.mode = mode;
 }
 
-static void udelay(uint32_t us)
+// btns: MXYZ SACB RLDU
+static void update_btns_3btn(const struct tp_pkt *pkt, uint32_t player)
 {
-	uint32_t start = micros();
+	// ?1CB RLDU ?0SA 00DU
+	uint16_t s_3btn;
 
-	while ((micros() - start) < us) {
-		asm volatile("nop; nop; nop; nop");
-		yield();
-	}
+	s_3btn  = (~pkt->bnts[player] << 8) & 0x3f00;
+	s_3btn |= (~pkt->bnts[player] >> 2) & 0x0030; // SA
+	s_3btn |= (~pkt->bnts[player]     ) & 0x0003; // DU
+	g.btn3_state[player].hw = s_3btn;
 }
 
-static void do_start_seq(void)
+static void update_btns_tp(const struct tp_pkt *pkt, uint32_t player)
 {
-	uint32_t edge_cnt_last;
-	uint32_t edge_cnt;
-	uint32_t start, t1, t2;
-	int tout;
+	uint8_t b0, b1;
 
-	start = micros();
-	edge_cnt = g.edge_cnt;
-
-	/* magic value */
-	g.pl[0].fixed_state[0] =
-	g.pl[0].fixed_state[1] = 0x25;
-
-	for (tout = 10000; tout > 0; tout--) {
-		edge_cnt_last = edge_cnt;
-		udelay(100);
-		edge_cnt = g.edge_cnt;
-
-		if (edge_cnt != edge_cnt_last)
-			continue;
-		if (!PL1_TH())
-			break;
-	}
-
-	g.pl[0].fixed_state[0] = 0x33;
-	g.pl[0].fixed_state[1] = 0x3f;
-	GPIOD_PDOR = 0x33;
-
-	t1 = micros();
-	if (tout == 0) {
-		printf("start_seq timeout1, t=%u\n", t1 - start);
-		return;
-	}
-
-	for (tout = 100000; tout > 0; tout--) {
-		udelay(1);
-
-		if (PL1_TH())
-			break;
-	}
-
-	t2 = micros();
-	if (tout == 0) {
-		printf("start_seq timeout2, t1=%u, t2=%u\n",
-			t1 - start, t2 - t1);
-		return;
-	}
-
-	//printf(" t1=%u, t2=%u\n", t1 - start, t2 - t1);
-
-	if (g.stream_started) {
-		printf("got start_seq when already started\n");
-		return;
-	}
-
-	if (!g.stream_enable_to && !g.stream_enable_from) {
-		printf("got start_seq, without enable from USB\n");
-		return;
-	}
-
-	if (g.stream_enable_to && g.pos_to_p[0].i == g.pos_to_p[0].o) {
-		printf("got start_seq while stream_to is empty\n");
-		return;
-	}
-
-	if (g.stream_enable_from && g.pos_from.i != g.pos_from.o) {
-		printf("got start_seq while stream_from is not empty\n");
-		return;
-	}
-
-	__disable_irq();
-	choose_isrs();
-	g.stream_started = 1;
-	__enable_irq();
+	b0 =  ~pkt->bnts[player] & 0x0f;
+	b1 = (~pkt->bnts[player] >> 4) & 0x0f;
+	g.tp_state[8 + player * 2    ] = b0;
+	g.tp_state[8 + player * 2 + 1] = b1;
 }
 
-// callers must disable IRQs
-static void clear_state(void)
+static void do_usb(const void *buf)
 {
-	int i;
-
-	g.stream_enable_to = 0;
-	g.stream_enable_from = 0;
-	g.stream_started = 0;
-	g.stream_ended = 0;
-	g.inc_mode = INC_MODE_VSYNC;
-	g.use_pending = 0;
-	for (i = 0; i < ARRAY_SIZE(g.pos_to_p); i++)
-		g.pos_to_p[i].i = g.pos_to_p[i].o = 0;
-	g.pos_from.i = g.pos_from.o = 0;
-	g.frame_cnt = 0;
-	memset(g.stream_to[1], 0x3f, sizeof(g.stream_to[1]));
-	choose_isrs_idle();
-}
-
-static int get_space_to(int p)
-{
-	return STREAM_BUF_SIZE - ((g.pos_to_p[p].i - g.pos_to_p[p].o)
-		& STREAM_BUF_MASK);
-}
-
-static int get_used_from(void)
-{
-	return (g.pos_from.i - g.pos_from.o) & STREAM_BUF_MASK;
-}
-
-static void do_usb(void *buf)
-{
-	struct tas_pkt *pkt = buf;
-	uint32_t pos_to_i, i, p;
-	int space;
+	const struct tp_pkt *pkt = buf;
+	uint32_t i;
 
 	switch (pkt->type) {
-	case PKT_FIXED_STATE:
-		memcpy(&i, pkt->data, sizeof(i));
-		if (g.use_pending)
-			g.pl[0].pending_state32 = i;
-		else
-			g.pl[0].fixed_state32 = i;
-		break;
-	case PKT_STREAM_ENABLE:
+	case PKT_UPD_MODE:
 		__disable_irq();
-		clear_state();
-		/* wait for start from MD */
-		g.stream_enable_to = pkt->enable.stream_to;
-		g.stream_enable_from = pkt->enable.stream_from;
-		g.inc_mode = pkt->enable.inc_mode;
-		if (pkt->enable.no_start_seq) {
-			GPIOD_PDOR = 0x3f;
-			choose_isrs();
-			g.stream_started = 1;
-		}
+		switch_mode(pkt->mode);
 		__enable_irq();
 		break;
-	case PKT_STREAM_ABORT:
-		__disable_irq();
-		clear_state();
-		__enable_irq();
-		break;
-	case PKT_STREAM_END:
-		g.stream_ended = 1;
-		printf("end of stream\n");
-		break;
-	case PKT_STREAM_DATA_TO_P1:
-	case PKT_STREAM_DATA_TO_P2:
-		p = pkt->type == PKT_STREAM_DATA_TO_P1 ? 0 : 1;
-		pos_to_i = g.pos_to_p[p].i;
-		space = get_space_to(p);
-		if (space <= pkt->size / STREAM_EL_SZ) {
-			printf("got data pkt while space=%d\n", space);
-			return;
+	case PKT_UPD_BTNS:
+		switch (g.mode) {
+		case OP_MODE_3BTN:
+			if (pkt->changed_players & 1)
+				update_btns_3btn(pkt, 0);
+			if (pkt->changed_players & 2)
+				update_btns_3btn(pkt, 1);
+			break;
+		case OP_MODE_TEAMPLAYER:
+			for (i = 0; i < 4; i++) {
+				if (!(pkt->changed_players & (1 << i)))
+					continue;
+				update_btns_tp(pkt, i);
+			}
 		}
-		for (i = 0; i < pkt->size / STREAM_EL_SZ; i++) {
-			memcpy(&g.stream_to[p][pos_to_i++],
-			       pkt->data + i * STREAM_EL_SZ,
-			       STREAM_EL_SZ);
-			pos_to_i &= STREAM_BUF_MASK;
-		}
-		g.pos_to_p[p].i = pos_to_i;
 		break;
 	default:
 		printf("got unknown pkt type: %04x\n", pkt->type);
@@ -508,58 +249,17 @@ static void do_usb(void *buf)
 	}
 }
 
-static void check_get_data(int p)
-{
-	struct tas_pkt pkt;
-	uint8_t buf[64];
-	int ret;
-
-	if (get_space_to(p) <= sizeof(pkt.data) / STREAM_EL_SZ)
-		return;
-
-	if (g.pos_to_p[p].i == g.pos_to_p[p].o && g.frame_cnt != 0) {
-		printf("underflow detected\n");
-		g.stream_enable_to = 0;
-		return;
-	}
-
-	pkt.type = PKT_STREAM_REQ;
-	pkt.req.frame = g.frame_cnt;
-	pkt.req.is_p2 = p;
-
-	ret = usb_rawhid_send(&pkt, 1000);
-	if (ret != sizeof(pkt)) {
-		printf("send STREAM_REQ/%d: %d\n", p, ret);
-		return;
-	}
-
-	ret = usb_rawhid_recv(buf, 1000);
-	if (ret != 64)
-		printf("usb_rawhid_recv/s: %d\n", ret);
-	else
-		do_usb(buf);
-}
-
 int main(void)
 {
 	uint32_t led_time = 0;
-	uint32_t scheck_time = 0;
-	uint32_t edge_cnt_last;
-	uint32_t edge_cnt;
 	uint8_t buf[64];
-	int i, ret;
+	int ret;
 
 	delay(1000); // wait for usb..
 
-	/* ?0SA 00DU, ?1CB RLDU */
-	for (i = 0; i < 2; i++) {
-		g.pl[i].fixed_state[0] = 0x33;
-		g.pl[i].fixed_state[1] = 0x3f;
-	}
-
 	printf("starting, rawhid: %d\n", usb_rawhid_available());
 
-	choose_isrs_idle();
+	switch_mode(OP_MODE_3BTN);
 
 	// md pin   th tr tl  r  l  d  u vsync   th  tr  tl  r  l  d  u
 	//           7  9  6  4  3  2  1          7   9   6  4  3  2  1
@@ -570,7 +270,8 @@ int main(void)
 
 	// player1
 	pinMode(21, INPUT);
-	attachInterrupt(21, pl1th_isr_fixed, CHANGE);
+	// note: func is not used, see attachInterruptVector()
+	attachInterrupt(21, pl1_isr_3btn, CHANGE);
 	NVIC_SET_PRIORITY(IRQ_PORTD, 0);
 
 	pinMode( 2, OUTPUT);
@@ -582,7 +283,7 @@ int main(void)
 
 	// player2
 	pinMode(15, INPUT);
-	attachInterrupt(15, pl1th_isr_fixed, CHANGE);
+	attachInterrupt(15, pl2_isr_nop, CHANGE);
 	NVIC_SET_PRIORITY(IRQ_PORTC, 0);
 
 	pinMode(16, OUTPUT);
@@ -591,11 +292,6 @@ int main(void)
 	pinMode(18, OUTPUT);
 	pinMode( 0, OUTPUT);
 	pinMode( 1, OUTPUT);
-
-	// vsync line
-	pinMode(3, INPUT);
-	attachInterrupt(3, vsync_isr_nop, RISING);
-	NVIC_SET_PRIORITY(IRQ_PORTA, 16);
 
 	// led
 	pinMode(13, OUTPUT);
@@ -615,60 +311,10 @@ int main(void)
 	printf("BASEPRI: %d, SHPR: %08x %08x %08x\n",
 		ret, SCB_SHPR1, SCB_SHPR2, SCB_SHPR3);
 
-	edge_cnt_last = g.edge_cnt;
-
 	while (1) {
-		struct tas_pkt pkt;
 		uint32_t now;
 
-		if (g.stream_enable_to && !g.stream_ended) {
-			check_get_data(0);
-			if (g.inc_mode == INC_MODE_SHARED_PL2
-			    || g.inc_mode == INC_MODE_SEPARATE)
-				check_get_data(1);
-		}
-
-		while (g.stream_enable_from && !g.stream_ended
-		  && get_used_from() >= sizeof(pkt.data) / STREAM_EL_SZ)
-		{
-			uint32_t o;
-			int i;
-
-			o = g.pos_from.o;
-			for (i = 0; i < sizeof(pkt.data); i += STREAM_EL_SZ) {
-				memcpy(pkt.data + i, &g.stream_from[o++],
-					STREAM_EL_SZ);
-				o &= STREAM_BUF_MASK;
-			}
-			g.pos_from.o = o;
-
-			pkt.type = PKT_STREAM_DATA_FROM;
-			pkt.size = i;
-
-			ret = usb_rawhid_send(&pkt, 1000);
-			if (ret != sizeof(pkt)) {
-				printf("send DATA_FROM: %d\n", ret);
-				break;
-			}
-		}
-
 		now = millis();
-
-		// start condition check
-		if (now - scheck_time > 1000) {
-			edge_cnt = g.edge_cnt;
-			//printf("e: %d th: %d\n", edge_cnt - edge_cnt_last,
-			//      PL1_TH());
-			if ((g.stream_enable_to || g.stream_enable_from)
-			    && !g.stream_started
-			    && edge_cnt - edge_cnt_last > 10000)
-			{
-				do_start_seq();
-				edge_cnt = g.edge_cnt;
-			}
-			edge_cnt_last = edge_cnt;
-			scheck_time = now;
-		}
 
 		// led?
 		if (CORE_PIN13_PORTREG & CORE_PIN13_BITMASK) {
