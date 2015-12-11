@@ -66,14 +66,19 @@ void yield(void)
 /* ?0SA 00DU, ?1CB RLDU */
 
 static struct {
-	union {
-		uint16_t hw;
-		uint8_t b[2];
-	} btn3_state[2];
-	//uint8_t btn6_state[2][4];
-	uint8_t tp_state[16];
+	struct {
+		union {
+			uint8_t b[2];
+			uint8_t b6[4 * 2];   // 6btn
+			uint32_t w;          // for more atomic change
+		};
+		uint32_t phase;              // 6btn
+		uint32_t time;
+	} btn_state[2];
 
-	uint32_t cnt;
+	uint8_t tp_state[16];
+	uint32_t tp_cnt;
+
 	uint32_t mode;
 	uint32_t pl1th:1;
 } g;
@@ -92,9 +97,27 @@ static void pl1_isr_3btn(void)
 	isfr = PL1_ISFR;
 	PL1_ISFR = isfr;
 
-	GPIOD_PDOR = g.btn3_state[0].b[PL1_TH()];
+	GPIOD_PDOR = g.btn_state[0].b[PL1_TH()];
 }
 
+static void pl1_isr_6btn(void)
+{
+	uint32_t isfr, th, phase = 0;
+
+	isfr = PL1_ISFR;
+	PL1_ISFR = isfr;
+
+	th = PL1_TH();
+	if (th)
+		g.btn_state[0].phase++;
+	if (g.btn_state[0].phase < 4)
+		phase = g.btn_state[0].phase;
+
+	GPIOD_PDOR = g.btn_state[0].b[(phase << 1) | PL1_TH()];
+	g.btn_state[0].time = millis();
+}
+
+// team player
 static noinline void pl1_isr_tp_do_th(void)
 {
 	uint32_t cnt, th;
@@ -103,7 +126,7 @@ static noinline void pl1_isr_tp_do_th(void)
 	cnt = !th;
 
 	GPIOD_PDOR = g.tp_state[cnt] | (PL1_TR() << 4);
-	g.cnt = cnt;
+	g.tp_cnt = cnt;
 	g.pl1th = th;
 }
 
@@ -121,8 +144,8 @@ static void pl1_isr_tp(void)
 	if (g.pl1th)
 		return;
 
-	g.cnt++;
-	GPIOD_PDOR = g.tp_state[g.cnt & 0x0f] | (PL1_TR() << 4);
+	g.tp_cnt++;
+	GPIOD_PDOR = g.tp_state[g.tp_cnt & 0x0f] | (PL1_TR() << 4);
 }
 
 /* player2 TH */
@@ -137,7 +160,34 @@ static void pl2_isr_nop(void)
 	isfr = PL2_ISFR;
 	PL2_ISFR = isfr;
 
-	//GPIOB_PDOR = PL2_ADJ(v);
+	GPIOB_PDOR = PL2_ADJ(0x3f);
+}
+
+static void pl2_isr_3btn(void)
+{
+	uint32_t isfr;
+
+	isfr = PL2_ISFR;
+	PL2_ISFR = isfr;
+
+	GPIOB_PDOR = PL2_ADJ(g.btn_state[1].b[PL2_TH()]);
+}
+
+static void pl2_isr_6btn(void)
+{
+	uint32_t isfr, th, phase = 0;
+
+	isfr = PL2_ISFR;
+	PL2_ISFR = isfr;
+
+	th = PL2_TH();
+	if (th)
+		g.btn_state[1].phase++;
+	if (g.btn_state[1].phase < 4)
+		phase = g.btn_state[1].phase;
+
+	GPIOB_PDOR = PL2_ADJ(g.btn_state[1].b[(phase << 1) | PL2_TH()]);
+	g.btn_state[1].time = millis();
 }
 
 /* * */
@@ -147,10 +197,9 @@ static void clear_state()
 
 	// no hw connected
 	for (p = 0; p < 2; p++) {
-		for (i = 0; i < 2; i++)
-			g.btn3_state[p].b[i] = 0x3f;
-		//for (i = 0; i < 4; i++)
-		//	g.btn6_state[p][i] = 0x3f;
+		for (i = 0; i < 4 * 2; i++)
+			g.btn_state[p].b6[i] = 0x3f;
+		g.btn_state[p].phase = 0;
 	}
 
 	// 4 pads, nothing pressed
@@ -163,22 +212,26 @@ static void clear_state()
 	for (; i < 16; i++)
 		g.tp_state[i] = 0x0f;
 
-	g.cnt = 0;
+	g.tp_cnt = 0;
 	g.pl1th = PL1_TH();
 }
 
 static void switch_mode(int mode)
 {
 	void (*pl1_handler)(void) = pl1_isr_3btn;
-	void (*pl2_handler)(void) = pl2_isr_nop;
+	void (*pl2_handler)(void) = pl2_isr_3btn;
 
 	clear_state();
 
 	switch (mode) {
 	default:
 	case OP_MODE_3BTN:
+		pinMode(20, OUTPUT);
+		break;
 	case OP_MODE_6BTN:
 		pinMode(20, OUTPUT);
+		pl1_handler = pl1_isr_6btn;
+		pl2_handler = pl2_isr_6btn;
 		break;
 	case OP_MODE_TEAMPLAYER:
 		pinMode(20, INPUT);
@@ -195,15 +248,27 @@ static void switch_mode(int mode)
 }
 
 // btns: MXYZ SACB RLDU
-static void update_btns_3btn(const struct tp_pkt *pkt, uint32_t player)
+static void update_btns_btn(const struct tp_pkt *pkt, uint32_t player)
 {
 	// ?1CB RLDU ?0SA 00DU
-	uint16_t s_3btn;
+	uint32_t s_6btn0, s_6btn1;
+	uint32_t s_3btn;
 
 	s_3btn  = (~pkt->bnts[player] << 8) & 0x3f00;
 	s_3btn |= (~pkt->bnts[player] >> 2) & 0x0030; // SA
 	s_3btn |= (~pkt->bnts[player]     ) & 0x0003; // DU
-	g.btn3_state[player].hw = s_3btn;
+	s_3btn |= s_3btn << 16;
+	g.btn_state[player].w = s_3btn;
+
+	// 6btn stuff
+	s_6btn0 = s_3btn & 0x30;
+	s_6btn1 = s_3btn >> 8;
+	g.btn_state[player].b6[4] = s_6btn0;        // ?0SA 0000
+	g.btn_state[player].b6[5] = s_6btn1;        // ?1CB RLDU
+	g.btn_state[player].b6[6] = s_6btn0 | 0x0f; // ?0SA 1111
+	s_6btn1 &= 0x30;
+	s_6btn1 |= (~pkt->bnts[player] >> 8) & 0x0f;
+	g.btn_state[player].b6[7] = s_6btn1;        // ?1CB MXYZ
 }
 
 static void update_btns_tp(const struct tp_pkt *pkt, uint32_t player)
@@ -230,10 +295,11 @@ static void do_usb(const void *buf)
 	case PKT_UPD_BTNS:
 		switch (g.mode) {
 		case OP_MODE_3BTN:
+		case OP_MODE_6BTN:
 			if (pkt->changed_players & 1)
-				update_btns_3btn(pkt, 0);
+				update_btns_btn(pkt, 0);
 			if (pkt->changed_players & 2)
-				update_btns_3btn(pkt, 1);
+				update_btns_btn(pkt, 1);
 			break;
 		case OP_MODE_TEAMPLAYER:
 			for (i = 0; i < 4; i++) {
@@ -312,9 +378,15 @@ int main(void)
 		ret, SCB_SHPR1, SCB_SHPR2, SCB_SHPR3);
 
 	while (1) {
-		uint32_t now;
+		uint32_t i, now;
 
 		now = millis();
+		for (i = 0; i < 2; i++) {
+			if (g.btn_state[i].phase == 0)
+				continue;
+			if (now - g.btn_state[i].time > 1)
+				g.btn_state[i].phase = 0;
+		}
 
 		// led?
 		if (CORE_PIN13_PORTREG & CORE_PIN13_BITMASK) {
