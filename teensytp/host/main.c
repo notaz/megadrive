@@ -331,6 +331,7 @@ enum mdbtn {
 };
 
 #define BTN_JOY BTN_JOYSTICK
+#define BTN_GP  BTN_GAMEPAD
 
 static const uint32_t evdev_md_default_map[KEY_CNT] = {
   [KEY_UP]       = MDBTN_UP,
@@ -345,11 +346,28 @@ static const uint32_t evdev_md_default_map[KEY_CNT] = {
   [KEY_D]        = MDBTN_Z,
   [KEY_F]        = MDBTN_MODE,
   [KEY_ENTER]    = MDBTN_START,
+  // joystick, assume diamond face button layout   1
+  //                                             4   2
+  //                                               3
+  [BTN_JOY + 0]  = MDBTN_X,
+  [BTN_JOY + 1]  = MDBTN_C,
+  [BTN_JOY + 2]  = MDBTN_B,
+  [BTN_JOY + 3]  = MDBTN_A,
+  [BTN_JOY + 4]  = MDBTN_Y,
+  [BTN_JOY + 5]  = MDBTN_Z,
+  [BTN_JOY + 6]  = MDBTN_START,
+  [BTN_JOY + 7]  = MDBTN_MODE,
+  [BTN_JOY + 9]  = MDBTN_START,
   // gamepad
-  [BTN_JOY + 0]  = MDBTN_A,
-  [BTN_JOY + 1]  = MDBTN_B,
-  [BTN_JOY + 2]  = MDBTN_C,
-  [BTN_JOY + 3]  = MDBTN_START,
+  [BTN_GP + 0]   = MDBTN_A,
+  [BTN_GP + 1]   = MDBTN_B,
+  [BTN_GP + 2]   = MDBTN_C,
+  [BTN_GP + 3]   = MDBTN_X,
+  [BTN_GP + 4]   = MDBTN_Y,
+  [BTN_GP + 5]   = MDBTN_Z,
+  [BTN_GP + 6]   = MDBTN_START,
+  [BTN_GP + 7]   = MDBTN_MODE,
+  [BTN_GP + 9]   = MDBTN_START,
   // pandora
   [KEY_HOME]     = MDBTN_A,
   [KEY_PAGEDOWN] = MDBTN_B,
@@ -357,13 +375,44 @@ static const uint32_t evdev_md_default_map[KEY_CNT] = {
   [KEY_LEFTALT]  = MDBTN_START,
 };
 
+static const uint16_t bind_to_mask[256] = {
+  ['u'] = MDBTN_UP,
+  ['d'] = MDBTN_DOWN,
+  ['l'] = MDBTN_LEFT,
+  ['r'] = MDBTN_RIGHT,
+  ['a'] = MDBTN_A,
+  ['b'] = MDBTN_B,
+  ['c'] = MDBTN_C,
+  ['s'] = MDBTN_START,
+  ['x'] = MDBTN_X,
+  ['y'] = MDBTN_Y,
+  ['z'] = MDBTN_Z,
+  ['m'] = MDBTN_MODE,
+  ['0'] = 0,          // to unbind a key
+};
+
 static struct player_state {
-  uint32_t kc_map[KEY_CNT];
   uint32_t state;
   int dirty;
 } players[4];
 
-static int do_evdev_input(int fd, unsigned int player_i)
+struct evdev_dev {
+  uint32_t kc_map[KEY_CNT];
+  uint32_t player;
+  int fd;
+  struct {
+    int min, max, zone;
+  } abs[2]; // more abs on TODO (problems like noisy analogs)
+} devs[16];
+
+static int verbose;
+
+#define printf_v(l_, fmt_, ...) do { \
+  if (verbose >= (l_)) \
+    fprintf(stderr, fmt_, ##__VA_ARGS__); \
+} while (0)
+
+static int do_evdev_input(struct evdev_dev *dev)
 {
   struct player_state *player;
   struct input_event ev;
@@ -372,51 +421,65 @@ static int do_evdev_input(int fd, unsigned int player_i)
   uint32_t old_state;
   int ret;
 
-  ret = read(fd, &ev, sizeof(ev));
+  ret = read(dev->fd, &ev, sizeof(ev));
   if (ret != sizeof(ev)) {
-    fprintf(stderr, "evdev read %d/%zd: ", ret, sizeof(ev));
+    fprintf(stderr, "%tu, p%u: evdev read %d/%zd: ",
+      dev - devs, dev->player, ret, sizeof(ev));
     perror("");
+    if (ret < 0) {
+      close(dev->fd);
+      dev->fd = -1;
+    }
     return 0;
   }
 
-  if (player_i >= ARRAY_SIZE(players)) {
-    fprintf(stderr, "bad player: %u\n", player_i);
+  if (dev->player >= ARRAY_SIZE(players)) {
+    fprintf(stderr, "bad player: %u\n", dev->player);
     return 0;
   }
-  player = &players[player_i];
+  player = &players[dev->player];
   old_state = player->state;
 
   if (ev.type == EV_ABS) {
-    if (ev.code == 0) {
-      mask_clear = MDBTN_LEFT | MDBTN_RIGHT;
-      if (ev.value < 10)
-        mask_set = MDBTN_LEFT;
-      else if (ev.value > 210)
-        mask_set = MDBTN_RIGHT;
+    uint32_t l, h;
+
+    if (ev.code >= ARRAY_SIZE(dev->abs)) {
+      printf_v(2, "abs id %u is too large\n", ev.code);
+      return 0;
     }
-    else {
-      mask_clear = MDBTN_UP | MDBTN_DOWN;
-      if (ev.value < 10)
-        mask_set = MDBTN_UP;
-      else if (ev.value > 210)
-        mask_set = MDBTN_DOWN;
-    }
-    printf("abs, s %x %x\n", mask_clear, mask_set);
+    printf_v(1, "%tu p%u: abs %u: %4d %4d %4d (%d)\n",
+      dev - devs, dev->player, ev.code,
+      dev->abs[ev.code].min, ev.value,
+      dev->abs[ev.code].max, dev->abs[ev.code].zone);
+
+    l = (ev.code & 1) ? MDBTN_UP   : MDBTN_LEFT;
+    h = (ev.code & 1) ? MDBTN_DOWN : MDBTN_RIGHT;
+    mask_clear = l | h;
+    if (ev.value < dev->abs[ev.code].min + dev->abs[ev.code].zone)
+      mask_set = l;
+    else if (ev.value > dev->abs[ev.code].max - dev->abs[ev.code].zone)
+      mask_set = h;
   }
   else if (ev.type == EV_KEY) {
     if (ev.value != 0 && ev.value != 1)
       return 0;
 
-    if ((uint32_t)ev.code >= ARRAY_SIZE(player->kc_map)) {
+    if ((uint32_t)ev.code >= ARRAY_SIZE(dev->kc_map)) {
       fprintf(stderr, "evdev read bad key: %u\n", ev.code);
       return 0;
     }
 
     if (ev.value) // press?
-      mask_set   = player->kc_map[ev.code];
+      mask_set   = dev->kc_map[ev.code];
     else
-      mask_clear = player->kc_map[ev.code];
+      mask_clear = dev->kc_map[ev.code];
   }
+  else {
+    return 0;
+  }
+
+  printf_v(1, "%tu p%u: c %03x, s %03x\n",
+      dev - devs, dev->player, mask_clear, mask_set);
 
   player->state &= ~mask_clear;
   player->state |=  mask_set;
@@ -425,10 +488,28 @@ static int do_evdev_input(int fd, unsigned int player_i)
   return player->dirty;
 }
 
-static int open_evdev(const char *name)
+static int open_evdev(struct evdev_dev *dev, char *str_in)
 {
-  int evdev_support = 0;
-  int fd, ret;
+  uint32_t event_support = 0;
+  uint32_t abs_support = 0;
+  struct input_absinfo absi;
+  const char *name = str_in;
+  char *p, *s, *binds = NULL;
+  int i, fd, ret;
+  char buf[64];
+
+  p = strchr(str_in, ',');
+  if (p != NULL) {
+    *p++ = 0;
+    binds = p;
+  }
+
+  p = NULL;
+  i = strtol(name, &p, 0);
+  if (p != NULL && *p == 0) {
+    snprintf(buf, sizeof(buf), "/dev/input/event%d", i);
+    name = buf;
+  }
 
   fd = open(name, O_RDONLY);
   if (fd == -1) {
@@ -436,17 +517,80 @@ static int open_evdev(const char *name)
     perror("");
     return -1;
   }
-  ret = ioctl(fd, EVIOCGBIT(0, sizeof(evdev_support)),
-              &evdev_support);
+  ret = ioctl(fd, EVIOCGBIT(0, sizeof(event_support)),
+              &event_support);
   if (ret < 0)
     perror("EVIOCGBIT");
-  if (!(evdev_support & (1 << EV_KEY))) {
-    fprintf(stderr, "%s doesn't have keys\n", name);
+  if (!(event_support & ((1 << EV_KEY) | (1 << EV_ABS)))) {
+    fprintf(stderr, "%s doesn't have keys or abs\n", name);
     close(fd);
     return -1;
   }
 
-  return fd;
+  dev->fd = fd;
+
+  if (event_support & (1 << EV_ABS)) {
+    ret = ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abs_support)),
+                &abs_support);
+    if (ret < 0)
+      perror("EVIOCGBIT");
+    for (i = 0; i < ARRAY_SIZE(dev->abs); i++) {
+      if (!(abs_support & (1 << i)))
+        continue;
+      ret = ioctl(fd, EVIOCGABS(i), &absi);
+      if (ret != 0) {
+        perror("EVIOCGABS");
+        continue;
+      }
+      dev->abs[i].min = absi.minimum;
+      dev->abs[i].max = absi.maximum;
+      dev->abs[i].zone = (absi.maximum - absi.minimum) / 3;
+    }
+  }
+
+  memcpy(dev->kc_map, evdev_md_default_map, sizeof(dev->kc_map));
+  if (binds != NULL) {
+    unsigned int kc, end = 0;
+
+    p = binds;
+    do {
+      s = p;
+      for (; *p != 0 && *p != ','; p++)
+        ;
+      if (*p == 0)
+        end = 1;
+      else
+        *p++ = 0;
+      if (strncmp(s, "j=", 2) == 0) {
+        kc = BTN_JOYSTICK;
+        s += 2;
+      }
+      else if (strncmp(s, "g=", 2) == 0) {
+        kc = BTN_GAMEPAD;
+        s += 2;
+      }
+      else {
+        ret = sscanf(s, "%u=", &kc);
+        if (ret != 1 || (s = strchr(s, '=')) == NULL) {
+          fprintf(stderr, "parse failed: '%s'\n", s);
+          break;
+        }
+        s++;
+      }
+      // bind
+      for (; *s != 0 && kc < sizeof(dev->kc_map); s++, kc++) {
+        uint32_t mask = bind_to_mask[(uint8_t)*s];
+        if (mask == 0 && *s != '0') {
+          fprintf(stderr, "%s: '%c' is not a valid MD btn\n", name, *s);
+          continue;
+        }
+        dev->kc_map[kc] = mask;
+      }
+    }
+    while (!end);
+  }
+
+  return 0;
 }
 
 static void do_stdin_input(uint32_t *mode, int *changed)
@@ -479,11 +623,6 @@ static void do_stdin_input(uint32_t *mode, int *changed)
   }
 }
 
-static int parse_binds(unsigned int player_i, const char *binds)
-{
-  return 0;
-}
-
 static int submit_urb(int fd, struct usbdevfs_urb *urb, int ep,
   void *buf, size_t buf_size)
 {
@@ -505,11 +644,13 @@ enum my_urbs {
 
 static void usage(const char *argv0)
 {
-  fprintf(stderr, "usage:\n%s <-e player /dev/input/node>*\n"
-    "  [-b <player> <keycode=mdbtn>[,keycode=mdbtn]]\n"
-    "  [-m <mode>]\n\n"
-    "  mdbtn: int 0-11: UDLR ABCS XYZM)\n"
-    "  mode:  int 0-2: 3btn 6btn teamplayer\n", argv0);
+  fprintf(stderr, "usage:\n%s <-e player /dev/input/node[,binds]>*\n"
+    "  [-m <mode>] [-v]\n\n"
+    "  binds:   <keycode=mdbtns>[,keycode=mdbtns]*\n"
+    "  keycode: first keycode (int), can be j,g for joy,gamepad btn0\n"
+    "  mdbtns:  sequence of chars from: udlrabcsxyzm0\n"
+    "           (u=up, d=down, ..., 0=unbind)\n"
+    "  mode:    int 0-2: 3btn 6btn teamplayer\n", argv0);
   exit(1);
 }
 
@@ -524,9 +665,7 @@ int main(int argc, char *argv[])
   struct teensy_dev dev;
   struct usbdevfs_urb urb[URB_CNT];
   struct usbdevfs_urb *reaped_urb;
-  uint32_t evdev_players[16];
-  int evdev_fds[16];
-  int evdev_fd_cnt = 0;
+  int dev_cnt = 0;
   int wait_device = 0;
   int pending_urbs = 0;
   int had_input = 0;
@@ -540,11 +679,6 @@ int main(int argc, char *argv[])
   uint32_t mode = OP_MODE_3BTN;
   uint32_t player;
   int i, ret = -1;
-  int fd;
-
-  for (i = 0; i < ARRAY_SIZE(players); i++)
-    memcpy(&players[i].kc_map, evdev_md_default_map,
-           sizeof(players[i].kc_map));
 
   for (i = 1; i < argc; i++) {
     if (argv[i][0] == '-') {
@@ -558,29 +692,15 @@ int main(int argc, char *argv[])
 
         if (argv[++i] == NULL)
           bad_arg(argv, i);
-        fd = open_evdev(argv[i]);
-        if (fd == -1)
-          bad_arg(argv, i);
-        if (evdev_fd_cnt >= ARRAY_SIZE(evdev_fds)) {
+        if (dev_cnt >= ARRAY_SIZE(devs)) {
           fprintf(stderr, "too many evdevs\n");
           break;
         }
-        evdev_players[evdev_fd_cnt] = player;
-        evdev_fds[evdev_fd_cnt] = fd;
-        evdev_fd_cnt++;
-        continue;
-      case 'b':
-        if (argv[++i] == NULL)
-          bad_arg(argv, i);
-        player = strtoul(argv[i], NULL, 0);
-        if (player >= ARRAY_SIZE(players))
-          bad_arg(argv, i);
-
-        if (argv[++i] == NULL)
-          bad_arg(argv, i);
-        ret = parse_binds(player, argv[i]);
+        ret = open_evdev(&devs[dev_cnt], argv[i]);
         if (ret != 0)
           bad_arg(argv, i);
+        devs[dev_cnt].player = player;
+        dev_cnt++;
         continue;
       case 'm':
         if (argv[++i] == NULL)
@@ -588,12 +708,15 @@ int main(int argc, char *argv[])
         mode = strtoul(argv[i], NULL, 0);
         mode_changed = 1;
         continue;
+      case 'v':
+        verbose++;
+        continue;
       }
     }
     bad_arg(argv, i);
   }
 
-  if (evdev_fd_cnt == 0)
+  if (dev_cnt == 0)
     usage(argv[0]);
 
   enable_echo(0);
@@ -651,8 +774,9 @@ int main(int argc, char *argv[])
 
     FD_ZERO(&rfds);
     FD_SET(STDIN_FILENO, &rfds);
-    for (i = 0; i < evdev_fd_cnt; i++)
-      FD_SET(evdev_fds[i], &rfds);
+    for (i = 0; i < dev_cnt; i++)
+      if (devs[i].fd != -1)
+        FD_SET(devs[i].fd, &rfds);
 
     FD_ZERO(&wfds);
     FD_SET(dev.fd, &wfds);
@@ -670,15 +794,15 @@ int main(int argc, char *argv[])
 
     /* something from input devices? */
     had_input = 0;
-    for (i = 0; i < evdev_fd_cnt; i++) {
-      if (FD_ISSET(evdev_fds[i], &rfds)) {
-        do_evdev_input(evdev_fds[i], evdev_players[i]);
+    for (i = 0; i < dev_cnt; i++) {
+      if (devs[i].fd != -1 && FD_ISSET(devs[i].fd, &rfds)) {
+        do_evdev_input(&devs[i]);
         had_input = 1;
       }
     }
     if (had_input) {
       /* collect any other input changes before starting
-       * the slow USB transfer */
+       * the slow USB transfer to teensy */
       tout.tv_sec = tout.tv_usec = 0;
       timeout = &tout;
       continue;
