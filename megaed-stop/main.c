@@ -79,7 +79,7 @@ static void VDP_drawTextML(const char *str, u16 plane_base,
 
     while (len-- > 0) {
         write16(GFX_DATA_PORT,
-            basetile | ((*src++) - 32 + TILE_FONT_BASE));
+            basetile | ((*src++) - 32 + TILE_FONT_BASE / 32));
     }
 }
 
