@@ -1,0 +1,35 @@
+  ORG $0
+
+init
+  di
+  im  $1
+  ld  sp, $2000
+
+loop
+  ld  a, ($1000)   ;      13
+  or  a            ;       4
+  jp  z, loop      ;      10  27 (41 worst)
+
+  ld  bc, ($1002)  ; src  20
+  ld  de, ($1004)  ; dst  20  67
+  ld  a, ($1001)   ; len  13
+  ld  h, a         ;       4  84 (98)
+loop_cp
+  ld  a, (bc)      ;       7
+  ld  (de), a      ;       7
+  inc bc           ;       6
+  inc de           ;       6
+  dec h            ;       4  30
+  jp  nz, loop_cp  ;      10  40
+
+  xor a            ;       4
+  ld  ($1000), a   ;      13
+  jp  loop         ;      10  27
+
+; ---
+
+  BLOCK $38-$
+
+irq
+  ret
+
