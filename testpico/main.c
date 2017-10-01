@@ -22,11 +22,12 @@
 
 #define VDP_DATA_PORT    0xC00000
 #define VDP_CTRL_PORT    0xC00004
+#define VDP_HV_COUNTER   0xC00008
 
 #define TILE_MEM_END     0xB000
 
 #define FONT_LEN         128
-#define TILE_FONT_BASE   (TILE_MEM_END / 32  - FONT_LEN)
+#define TILE_FONT_BASE   (TILE_MEM_END - FONT_LEN * 32)
 
 /* note: using ED menu's layout here.. */
 #define WPLANE           (TILE_MEM_END + 0x0000)
@@ -103,6 +104,18 @@ enum {
 #define VDP_MODE2_DMA  0x10
 #define VDP_MODE2_IE0  0x20 // v int
 #define VDP_MODE2_DISP 0x40
+#define VDP_MODE2_128K 0x80
+
+#define SR_PAL        (1 << 0)
+#define SR_DMA        (1 << 1)
+#define SR_HB         (1 << 2)
+#define SR_VB         (1 << 3)
+#define SR_ODD        (1 << 4)
+#define SR_C          (1 << 5)
+#define SR_SOVR       (1 << 6)
+#define SR_F          (1 << 7)
+#define SR_FULL       (1 << 8)
+#define SR_EMPT       (1 << 9)
 
 /* cell counts */
 #define LEFT_BORDER 1   /* lame TV */
@@ -385,6 +398,30 @@ static void do_setup_dma(const void *src_, u16 words)
     // write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(addr) | CTL_WRITE_DMA);
 }
 
+static void vdp_wait_for_fifo_empty(void)
+{
+    while (!(read16(VDP_CTRL_PORT) & 0x200))
+        /* fifo not empty */;
+}
+
+static void vdp_wait_for_dma_idle(void)
+{
+    while (read16(VDP_CTRL_PORT) & 2)
+        /* dma busy */;
+}
+
+static void vdp_wait_for_line_0(void)
+{
+    // in PAL vcounter reports 0 twice in a frame,
+    // so wait for vblank to clear first
+    while (!(read16(VDP_CTRL_PORT) & 8))
+        /* not blanking */;
+    while (read16(VDP_CTRL_PORT) & 8)
+        /* blanking */;
+    while (read8(VDP_HV_COUNTER) != 0)
+        ;
+}
+
 static void t_dma_zero_wrap_early(void)
 {
     const u32 *src = (const u32 *)0x3c0000;
@@ -415,8 +452,7 @@ static void t_dma_zero_fill_early(void)
     write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(1) | CTL_WRITE_DMA);
     write16(VDP_DATA_PORT, 0x1122);
     ram[2] = read16(VDP_CTRL_PORT);
-    while (read16(VDP_CTRL_PORT) & 2)
-        ;
+    vdp_wait_for_dma_idle();
 
     VDP_setReg(VDP_AUTOINC, 2);
     write32(VDP_CTRL_PORT, CTL_READ_VRAM(0));
@@ -426,6 +462,18 @@ static void t_dma_zero_fill_early(void)
 #define expect(ok_, v0_, v1_) \
 if ((v0_) != (v1_)) { \
     printf("%s: %08x %08x\n", #v0_, v0_, v1_); \
+    ok_ = 0; \
+}
+
+#define expect_range(ok_, v0_, vmin_, vmax_) \
+if ((v0_) < (vmin_) || (v0_) > (vmax_)) { \
+    printf("%s: %02x /%02x-%02x\n", #v0_, v0_, vmin_, vmax_); \
+    ok_ = 0; \
+}
+
+#define expect_bits(ok_, v0_, val_, mask_) \
+if (((v0_) & (mask_)) != (val_)) { \
+    printf("%s: %04x & %04x != %04x\n", #v0_, v0_, mask_, val_); \
     ok_ = 0; \
 }
 
@@ -557,7 +605,7 @@ static int t_dma_vsram_wrap(void)
 static int t_dma_and_data(void)
 {
     const u32 *src = (const u32 *)0x3c0000;
-    u32 v0;
+    u32 v0, v1;
     int ok = 1;
 
     write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100));
@@ -567,10 +615,41 @@ static int t_dma_and_data(void)
     write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0xfc) | CTL_WRITE_DMA);
     write32(VDP_DATA_PORT, 0x5ec8a248);
 
-    write32(VDP_CTRL_PORT, CTL_READ_VRAM(0x100));
+    write32(VDP_CTRL_PORT, CTL_READ_VRAM(0xfc));
     v0 = read32(VDP_DATA_PORT);
+    v1 = read32(VDP_DATA_PORT);
 
-    expect(ok, v0, 0x5ec8a248);
+    expect(ok, v0, src[0]);
+    expect(ok, v1, 0x5ec8a248);
+    return ok;
+}
+
+static int t_dma_short_cmd(void)
+{
+    const u32 *src = (const u32 *)0x3c0000;
+    u32 v0, v1, v2;
+    int ok = 1;
+
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x3ff4));
+    write32(VDP_DATA_PORT, 0x10111213);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0xfff0));
+    write32(VDP_DATA_PORT, 0x20212223);
+    write32(VDP_DATA_PORT, 0x30313233);
+
+    do_setup_dma(src, 2);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0xfff0) | CTL_WRITE_DMA);
+    write16(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x3ff4) >> 16);
+    write32(VDP_DATA_PORT, 0x40414243);
+
+    write32(VDP_CTRL_PORT, CTL_READ_VRAM(0x3ff4));
+    v0 = read32(VDP_DATA_PORT);
+    write32(VDP_CTRL_PORT, CTL_READ_VRAM(0xfff0));
+    v1 = read32(VDP_DATA_PORT);
+    v2 = read32(VDP_DATA_PORT);
+
+    expect(ok, v0, 0x10111213);
+    expect(ok, v1, src[0]);
+    expect(ok, v2, 0x40414243);
     return ok;
 }
 
@@ -589,8 +668,7 @@ static int t_dma_fill3_odd(void)
     VDP_setReg(VDP_DMA_SRC2, 0x80);
     write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x101) | CTL_WRITE_DMA);
     write16(VDP_DATA_PORT, 0x1122);
-    while (read16(VDP_CTRL_PORT) & 2)
-        ;
+    vdp_wait_for_dma_idle();
 
     VDP_setReg(VDP_AUTOINC, 2);
     write32(VDP_CTRL_PORT, CTL_READ_VRAM(0x100));
@@ -619,8 +697,7 @@ static int t_dma_fill3_even(void)
     VDP_setReg(VDP_DMA_SRC2, 0x80);
     write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100) | CTL_WRITE_DMA);
     write16(VDP_DATA_PORT, 0x1122);
-    while (read16(VDP_CTRL_PORT) & 2)
-        ;
+    vdp_wait_for_dma_idle();
 
     VDP_setReg(VDP_AUTOINC, 2);
     write32(VDP_CTRL_PORT, CTL_READ_VRAM(0x100));
@@ -647,14 +724,14 @@ static unused int t_dma_fill3_vsram(void)
     write16(VDP_DATA_PORT, 0x0111);
     write16(VDP_DATA_PORT, 0x0222);
     write16(VDP_DATA_PORT, 0x0333);
+    vdp_wait_for_fifo_empty();
 
     VDP_setReg(VDP_AUTOINC, 3);
     VDP_setReg(VDP_DMA_LEN0, 3);
     VDP_setReg(VDP_DMA_SRC2, 0x80);
     write32(VDP_CTRL_PORT, CTL_WRITE_VSRAM(1) | CTL_WRITE_DMA);
     write16(VDP_DATA_PORT, 0x0102);
-    while (read16(VDP_CTRL_PORT) & 2)
-        ;
+    vdp_wait_for_dma_idle();
 
     VDP_setReg(VDP_AUTOINC, 2);
     write32(VDP_CTRL_PORT, CTL_READ_VSRAM(0));
@@ -685,13 +762,11 @@ static int t_dma_fill_dis(void)
     write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100) | CTL_WRITE_DMA);
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD);
     write16(VDP_DATA_PORT, 0x1122);
-    while (read16(VDP_CTRL_PORT) & 2)
-        ;
+    vdp_wait_for_dma_idle();
 
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
     write16(VDP_DATA_PORT, 0x3344);
-    while (read16(VDP_CTRL_PORT) & 2)
-        ;
+    vdp_wait_for_dma_idle();
 
     write32(VDP_CTRL_PORT, CTL_READ_VRAM(0x100));
     v0 = read32(VDP_DATA_PORT);
@@ -718,8 +793,7 @@ static int t_dma_fill_src(void)
     VDP_setReg(VDP_DMA_SRC2, 0x80);
     write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100) | CTL_WRITE_DMA);
     write16(VDP_DATA_PORT, 0x1122);
-    while (read16(VDP_CTRL_PORT) & 2)
-        ;
+    vdp_wait_for_dma_idle();
 
     VDP_setReg(VDP_DMA_LEN0, 2);
     VDP_setReg(VDP_DMA_SRC2, (u32)src >> 17);
@@ -731,6 +805,122 @@ static int t_dma_fill_src(void)
 
     expect(ok, v0, 0x11220011);
     expect(ok, v1, src[1]);
+    return ok;
+}
+
+// (((a & 2) >> 1) ^ 1) | ((a & $400) >> 9) | (a & $3FC) | ((a & $1F800) >> 1)
+static int t_dma_128k(void)
+{
+    u16 *ram = (u16 *)0xff0000;
+    u32 v0, v1;
+    int ok = 1;
+
+    ram[0] = 0x5a11;
+    ram[1] = 0x5a22;
+    ram[2] = 0x5a33;
+
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100));
+    write32(VDP_DATA_PORT, 0x01020304);
+    write32(VDP_DATA_PORT, 0x05060708);
+    vdp_wait_for_fifo_empty();
+
+    mem_barrier();
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_128K);
+    do_setup_dma(ram, 3);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100) | CTL_WRITE_DMA);
+    vdp_wait_for_fifo_empty();
+
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
+    write32(VDP_CTRL_PORT, CTL_READ_VRAM(0x100));
+    v0 = read32(VDP_DATA_PORT);
+    v1 = read32(VDP_DATA_PORT);
+
+    expect(ok, v0, 0x22110304);
+    expect(ok, v1, 0x05330708);
+    return ok;
+}
+
+static int t_vdp_128k_b16(void)
+{
+    u32 v0, v1;
+    int ok = 1;
+
+    VDP_setReg(VDP_AUTOINC, 0);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x8100));
+    write32(VDP_DATA_PORT, 0x01020304);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x10100));
+    write32(VDP_DATA_PORT, 0x05060708);
+    vdp_wait_for_fifo_empty();
+
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_128K);
+    write16(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100) >> 16); // note: upper cmd
+    write32(VDP_DATA_PORT, 0x11223344);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x10102));
+    write32(VDP_DATA_PORT, 0x55667788);
+    vdp_wait_for_fifo_empty();
+
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
+    write32(VDP_CTRL_PORT, CTL_READ_VRAM(0x8100));
+    v0 = read16(VDP_DATA_PORT);
+    write32(VDP_CTRL_PORT, CTL_READ_VRAM(0x0100));
+    v1 = read16(VDP_DATA_PORT);
+
+    VDP_setReg(VDP_AUTOINC, 2);
+
+    expect(ok, v0, 0x8844);
+    expect(ok, v1, 0x0708);
+    return ok;
+}
+
+static unused int t_vdp_128k_b16_inc(void)
+{
+    u32 v0, v1;
+    int ok = 1;
+
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0));
+    write32(VDP_DATA_PORT, 0x01020304);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x8000));
+    write32(VDP_DATA_PORT, 0x05060708);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0xfffe));
+    write32(VDP_DATA_PORT, 0x090a0b0c);
+    vdp_wait_for_fifo_empty();
+
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_128K);
+    write16(VDP_CTRL_PORT, CTL_WRITE_VRAM(0) >> 16); // note: upper cmd
+    write16(VDP_DATA_PORT, 0x1122);
+    vdp_wait_for_fifo_empty();
+
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
+    write32(VDP_CTRL_PORT, CTL_READ_VRAM(0));
+    v0 = read32(VDP_DATA_PORT);
+    write32(VDP_CTRL_PORT, CTL_READ_VRAM(0x8000));
+    v1 = read32(VDP_DATA_PORT);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0));
+    write32(VDP_DATA_PORT, 0);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x8000));
+    write32(VDP_DATA_PORT, 0);
+
+    expect(ok, v0, 0x0b0c0304); // XXX: no 22 anywhere?
+    expect(ok, v1, 0x05060708);
+    return ok;
+}
+
+static int t_vdp_reg_cmd(void)
+{
+    u32 v0;
+    int ok = 1;
+
+    VDP_setReg(VDP_AUTOINC, 0);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100));
+    write32(VDP_DATA_PORT, 0x01020304);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
+    write32(VDP_DATA_PORT, 0x05060708);
+
+    VDP_setReg(VDP_AUTOINC, 2);
+    write32(VDP_CTRL_PORT, CTL_READ_VRAM(0x0100));
+    v0 = read16(VDP_DATA_PORT);
+
+    expect(ok, v0, 0x0304);
     return ok;
 }
 
@@ -755,6 +945,27 @@ static int t_z80mem_long_mirror(void)
     return ok;
 }
 
+static int t_z80mem_noreq_w(void)
+{
+    u8 *zram = (u8 *)0xa00000;
+    int ok = 1;
+
+    write8(&zram[0x1100], 0x11);
+    mem_barrier();
+    write16(0xa11100, 0x000);
+    write8(&zram[0x1100], 0x22);
+    mem_barrier();
+
+    write16(0xa11100, 0x100);
+    while (read16(0xa11100) & 0x100)
+        ;
+
+    expect(ok, zram[0x1100], 0x11);
+    return ok;
+}
+
+#define Z80_CP_CYCLES(b) (118 + ((b) - 1) * 21 + 26 + 17)
+
 static int t_z80mem_vdp_r(void)
 {
     u8 *zram = (u8 *)0xa00000;
@@ -765,22 +976,22 @@ static int t_z80mem_vdp_r(void)
     write32(VDP_CTRL_PORT, CTL_READ_VRAM(0x100));
 
     zram[0x1000] = 1; // cp
-    zram[0x1001] = 2; // len
     write16_z80le(&zram[0x1002], 0x7f00); // src
-    write16_z80le(&zram[0x1004], 0x1006); // dst
-    zram[0x1006] = zram[0x1007] = zram[0x1008] = 0x5a;
+    write16_z80le(&zram[0x1004], 0x1100); // dst
+    write16_z80le(&zram[0x1006], 2); // len
+    zram[0x1100] = zram[0x1101] = zram[0x1102] = 0x5a;
     mem_barrier();
     write16(0xa11100, 0x000);
-    burn10((98 + 40*2 + 27) * 15 / 7 * 2 / 10);
+    burn10(Z80_CP_CYCLES(2) * 15 / 7 * 2 / 10);
 
     write16(0xa11100, 0x100);
     while (read16(0xa11100) & 0x100)
         ;
 
     expect(ok, zram[0x1000], 0);
-    expect(ok, zram[0x1006], 0x11);
-    expect(ok, zram[0x1007], 0x44);
-    expect(ok, zram[0x1008], 0x5a);
+    expect(ok, zram[0x1100], 0x11);
+    expect(ok, zram[0x1101], 0x44);
+    expect(ok, zram[0x1102], 0x5a);
     return ok;
 }
 
@@ -793,16 +1004,17 @@ static unused int t_z80mem_vdp_w(void)
     write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100));
     write32(VDP_DATA_PORT, 0x11223344);
     write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100));
+    vdp_wait_for_fifo_empty();
 
     zram[0x1000] = 1; // cp
-    zram[0x1001] = 2; // len
-    write16_z80le(&zram[0x1002], 0x1006); // src
+    write16_z80le(&zram[0x1002], 0x1100); // src
     write16_z80le(&zram[0x1004], 0x7f00); // dst
-    zram[0x1006] = 0x55;
-    zram[0x1007] = 0x66;
+    write16_z80le(&zram[0x1006], 2); // len
+    zram[0x1100] = 0x55;
+    zram[0x1101] = 0x66;
     mem_barrier();
     write16(0xa11100, 0x000);
-    burn10((98 + 40*2 + 27) * 15 / 7 * 2 / 10);
+    burn10(Z80_CP_CYCLES(2) * 15 / 7 * 2 / 10);
 
     write16(0xa11100, 0x100);
     while (read16(0xa11100) & 0x100)
@@ -813,6 +1025,209 @@ static unused int t_z80mem_vdp_w(void)
 
     expect(ok, zram[0x1000], 0);
     expect(ok, v0, 0x55556666);
+    return ok;
+}
+
+static int t_tim_loop(void)
+{
+    u8 vcnt;
+    int ok = 1;
+
+    vdp_wait_for_line_0();
+    burn10(488*220/10);
+    vcnt = read8(VDP_HV_COUNTER);
+    mem_barrier();
+
+    //expect_range(ok, vcnt, 0x80, 0x80);
+    expect(ok, vcnt, 223);
+    return ok;
+}
+
+#define Z80_RD_V_CYCLES(b) (132 + (b) * 38 + 50 + 17)
+
+// 80 80 91 95-96
+static void z80_read_loop(u8 *zram, u16 src)
+{
+    const int pairs = 512 + 256;
+
+    zram[0x1000] = 2; // read loop, save vcnt
+    write16_z80le(&zram[0x1002], src); // src
+    write16_z80le(&zram[0x1004], 0x1100); // vcnt dst
+    write16_z80le(&zram[0x1006], pairs); // reads/2
+    zram[0x1100] = 0;
+    mem_barrier();
+
+    vdp_wait_for_line_0();
+    write16(0xa11100, 0x000);
+    burn10(Z80_RD_V_CYCLES(pairs) * 15 / 7 * 4 / 10);
+
+    write16(0xa11100, 0x100);
+    while (read16(0xa11100) & 0x100)
+        ;
+}
+
+static int t_tim_z80_ram(void)
+{
+    u8 *zram = (u8 *)0xa00000;
+    int ok = 1;
+
+    z80_read_loop(zram, 0);
+
+    expect(ok, zram[0x1000], 0);
+    expect_range(ok, zram[0x1100], 0x80, 0x80);
+    return ok;
+}
+
+static int t_tim_z80_ym(void)
+{
+    u8 *zram = (u8 *)0xa00000;
+    int ok = 1;
+
+    z80_read_loop(zram, 0x4000);
+
+    expect(ok, zram[0x1000], 0);
+    expect_range(ok, zram[0x1100], 0x80, 0x80);
+    return ok;
+}
+
+static int t_tim_z80_vdp(void)
+{
+    u8 *zram = (u8 *)0xa00000;
+    int ok = 1;
+
+    z80_read_loop(zram, 0x7f08);
+
+    expect(ok, zram[0x1000], 0);
+#ifndef PICO
+    expect_range(ok, zram[0x1100], 0x91, 0x91);
+#else
+    expect_range(ok, zram[0x1100], 0x8e, 0x91);
+#endif
+    return ok;
+}
+
+static int t_tim_z80_bank_rom(void)
+{
+    u8 *zram = (u8 *)0xa00000;
+    int i, ok = 1;
+
+    for (i = 0; i < 17; i++)
+        write8(0xa06000, 0); // bank 0
+
+    z80_read_loop(zram, 0x8000);
+
+    expect(ok, zram[0x1000], 0);
+#ifndef PICO
+    expect_range(ok, zram[0x1100], 0x95, 0x96);
+#else
+    expect_range(ok, zram[0x1100], 0x93, 0x96);
+#endif
+    return ok;
+}
+
+/* borderline too slow */
+#if 0
+static void do_vcnt_vb(void)
+{
+    const u32 *srhv = (u32 *)0xc00006; // to read SR and HV counter
+    u32 *ram = (u32 *)0xff0000;
+    u16 vcnt, vcnt_expect = 0;
+    u16 sr, count = 0;
+    u32 val, old;
+
+    vdp_wait_for_line_0();
+    old = read32(srhv);
+    *ram++ = old;
+    for (;;) {
+        val = read32(srhv);
+        vcnt = val & 0xff00;
+        if (vcnt == vcnt_expect)
+            continue;
+        sr = val >> 16;
+        if (vcnt == 0 && !(sr & SR_VB)) // not VB
+            break; // wrapped to start of frame
+//        count++;
+        vcnt_expect += 0x100;
+        if (vcnt == vcnt_expect && !((sr ^ (old >> 16)) & SR_VB)) {
+            old = val;
+            continue;
+        }
+        // should have a vcnt jump here
+        *ram++ = old;
+        *ram++ = val;
+        vcnt_expect = vcnt;
+        old = val;
+    }
+    *ram++ = val;
+    *ram = count;
+    mem_barrier();
+}
+#endif
+
+static int t_tim_vcnt(void)
+{
+    const u32 *ram32 = (u32 *)0xff0000;
+    const u8 *ram = (u8 *)0xff0000;
+    u8 pal = read8(0xa10001) & 0x40;
+    u8 vc_jmp_b = pal ? 0x02 : 0xea;
+    u8 vc_jmp_a = pal ? 0xca : 0xe5;
+    u16 lines = pal ? 313 : 262;
+    int ok = 1;
+
+    do_vcnt_vb();
+    expect(ok, ram[0*4+2], 0); // line 0
+    expect_bits(ok, ram[0*4+1], 0, SR_VB);
+    expect(ok, ram[1*4+2], 223); // last no blank
+    expect_bits(ok, ram[1*4+1], 0, SR_VB);
+    expect(ok, ram[2*4+2], 224); // 1st blank
+    expect_bits(ok, ram[2*4+1], SR_VB, SR_VB);
+    expect(ok, ram[3*4+2], vc_jmp_b); // before jump
+    expect_bits(ok, ram[3*4+1], SR_VB, SR_VB);
+    expect(ok, ram[4*4+2], vc_jmp_a); // after jump
+    expect_bits(ok, ram[4*4+1], SR_VB, SR_VB);
+    expect(ok, ram[5*4+2], 0xfe); // before vb clear
+    expect_bits(ok, ram[5*4+1], SR_VB, SR_VB);
+    expect(ok, ram[6*4+2], 0xff); // after vb clear
+    expect_bits(ok, ram[6*4+1], 0, SR_VB);
+    expect(ok, ram[7*4+2], 0); // next line 0
+    expect_bits(ok, ram[7*4+1], 0, SR_VB);
+    expect(ok, ram32[8], lines - 1);
+    return ok;
+}
+
+static int t_tim_vdp_as_vram_w(void)
+{
+    int ok = 1;
+    u8 vcnt;
+
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100));
+    vdp_wait_for_line_0();
+    write16_x16(VDP_DATA_PORT, 112*18 / 16, 0);
+    vcnt = read8(VDP_HV_COUNTER);
+    mem_barrier();
+
+    expect(ok, vcnt, 112*2-1);
+    return ok;
+}
+
+static int t_tim_vdp_as_cram_w(void)
+{
+    int ok = 1;
+    u8 vcnt;
+
+    write32(VDP_CTRL_PORT, CTL_WRITE_CRAM(0));
+    vdp_wait_for_line_0();
+    write16_x16(VDP_DATA_PORT, 112*18 / 16, 0);
+    vcnt = read8(VDP_HV_COUNTER);
+    mem_barrier();
+
+    setup_default_palette();
+
+#ifndef PICO
+    expect(ok, vcnt, 112);
+#else
+    expect_range(ok, vcnt, 111, 112);
+#endif
     return ok;
 }
 
@@ -827,14 +1242,30 @@ static const struct {
     { t_dma_cram_wrap,       "dma cram wrap" },
     { t_dma_vsram_wrap,      "dma vsram wrap" },
     { t_dma_and_data,        "dma and data" },
+    { t_dma_short_cmd,       "dma short cmd" },
     { t_dma_fill3_odd,       "dma fill3 odd" },
     { t_dma_fill3_even,      "dma fill3 even" },
-    // { t_dma_fill3_vsram,     "dma fill3 vsram" }, // later
+#ifndef PICO // later
+    { t_dma_fill3_vsram,     "dma fill3 vsram" },
+#endif
     { t_dma_fill_dis,        "dma fill disabled" },
     { t_dma_fill_src,        "dma fill src incr" },
+    { t_dma_128k,            "dma 128k mode" },
+    { t_vdp_128k_b16,        "vdp 128k addr bit16" },
+    // { t_vdp_128k_b16_inc,    "vdp 128k bit16 inc" }, // mystery
+    { t_vdp_reg_cmd,         "vdp reg w cmd reset" },
     { t_z80mem_long_mirror,  "z80 ram long mirror" },
+    { t_z80mem_noreq_w,      "z80 ram noreq write" },
     { t_z80mem_vdp_r,        "z80 vdp read" },
     // { t_z80mem_vdp_w,        "z80 vdp write" }, // hang
+    { t_tim_loop,            "time loop" },
+    { t_tim_z80_ram,         "time z80 ram" },
+    { t_tim_z80_ym,          "time z80 ym2612" },
+    { t_tim_z80_vdp,         "time z80 vdp" },
+    { t_tim_z80_bank_rom,    "time z80 bank rom" },
+    { t_tim_vcnt,            "time V counter" },
+    { t_tim_vdp_as_vram_w,   "time vdp vram w" },
+    { t_tim_vdp_as_cram_w,   "time vdp cram w" },
 };
 
 static void setup_z80(void)
@@ -855,15 +1286,51 @@ static void setup_z80(void)
         write8(&zram[i], z80_test[i]);
     for (i = 0x1000; i < 0x1007; i++)
         write8(&zram[i], 0);
+
+    // reset
+    write16(0xa11200, 0x000);
+    write16(0xa11100, 0x000);
+    burn10(1);
+    write16(0xa11200, 0x100);
+    burn10(1);
+
+    // take back the bus
+    write16(0xa11100, 0x100);
+    while (read16(0xa11100) & 0x100)
+        ;
+}
+
+static void wait_next_vsync(void)
+{
+    while (read16(VDP_CTRL_PORT) & 8)
+        /* blanking */;
+    while (!(read16(VDP_CTRL_PORT) & 8))
+        /* not blanking */;
+}
+
+static int hexinc(char *c)
+{
+    (*c)++;
+    if (*c > 'f') {
+        *c = '0';
+        return 1;
+    }
+    if (*c == '9' + 1)
+        *c = 'a';
+    return 0;
 }
 
 int main()
 {
     int passed = 0;
     int ret;
+    u8 v8;
     int i;
 
     setup_z80();
+
+    /* io */
+    write8(0xa10009, 0x40);
 
     /* setup VDP */
     while (read16(VDP_CTRL_PORT) & 2)
@@ -921,23 +1388,26 @@ int main()
 
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
 
-    printf("\n");
-    printf("MD version: %02x\n", read8(0xa10001));
+    v8 = read8(0xa10001);
+    printf("MD version: %02x %s %s\n", v8,
+        (v8 & 0x80) ? "world" : "jap",
+        (v8 & 0x40) ? "pal" : "ntsc");
 
     for (i = 0; i < ARRAY_SIZE(g_tests); i++) {
         // print test number if we haven't scrolled away
         if (printf_ypos < CSCREEN_H) {
             int old_ypos = printf_ypos;
             printf_ypos = 0;
-            text_pal = 0;
             printf("%02d/%02d", i, ARRAY_SIZE(g_tests));
             printf_ypos = old_ypos;
             printf_xpos = 0;
         }
-        text_pal = 2;
         ret = g_tests[i].test();
-        if (ret != 1)
+        if (ret != 1) {
+            text_pal = 2;
             printf("failed %d: %s\n", i, g_tests[i].name);
+            text_pal = 0;
+        }
         else
             passed++;
     }
@@ -947,6 +1417,83 @@ int main()
 
     printf_ypos = 0;
     printf("     ");
+
+    while (!(get_input() & BTNM_A))
+        wait_next_vsync();
+
+
+    {
+        char c[3] = { '0', '0', '0' };
+        short hscroll = 0, vscroll = 0;
+        short hsz = 1, vsz = 0;
+        short cellmode = 0;
+
+        write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(APLANE));
+
+        for (i = 0; i < 8 * 1024 / 2 / 4; i++) {
+            write16(VDP_DATA_PORT, (u16)'.'  - 32 + TILE_FONT_BASE / 32);
+            write16(VDP_DATA_PORT, (u16)c[2] - 32 + TILE_FONT_BASE / 32);
+            write16(VDP_DATA_PORT, (u16)c[1] - 32 + TILE_FONT_BASE / 32);
+            write16(VDP_DATA_PORT, (u16)c[0] - 32 + TILE_FONT_BASE / 32);
+            if (hexinc(&c[0]))
+                if (hexinc(&c[1]))
+                    hexinc(&c[2]);
+        }
+        while (get_input() & BTNM_A)
+            wait_next_vsync();
+
+        wait_next_vsync();
+        for (;;) {
+            int b = get_input();
+
+            if (b & BTNM_C) {
+                hscroll = 1, vscroll = -1;
+                do {
+                    wait_next_vsync();
+                } while (get_input() & BTNM_C);
+                cellmode ^= 1;
+            }
+            if (b & (BTNM_L | BTNM_R | BTNM_C)) {
+                hscroll += (b & BTNM_L) ? 1 : -1;
+                write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(HSCRL));
+                write16(VDP_DATA_PORT, hscroll);
+            }
+            if (b & (BTNM_U | BTNM_D | BTNM_C)) {
+                vscroll += (b & BTNM_U) ? -1 : 1;
+                write32(VDP_CTRL_PORT, CTL_WRITE_VSRAM(0));
+                if (cellmode) {
+                    int end = (int)vscroll + 21;
+                    for (i = vscroll; i < end; i++)
+                        write32(VDP_DATA_PORT, i << 17);
+                    VDP_setReg(VDP_MODE3, 0x04);
+                }
+                else {
+                    write16(VDP_DATA_PORT, vscroll);
+                    VDP_setReg(VDP_MODE3, 0x00);
+                }
+            }
+            if (b & BTNM_A) {
+                hsz = (hsz + 1) & 3;
+                do {
+                    wait_next_vsync();
+                } while (get_input() & BTNM_A);
+            }
+            if (b & BTNM_B) {
+                vsz = (vsz + 1) & 3;
+                do {
+                    wait_next_vsync();
+                } while (get_input() & BTNM_B);
+            }
+            VDP_setReg(VDP_SCROLLSZ, (vsz << 4) | hsz);
+
+            printf_xpos = 1;
+            printf_ypos = 0;
+            text_pal = 1;
+            printf(" %d %d ", hsz, vsz);
+
+            wait_next_vsync();
+        }
+    }
 
     for (;;)
         ;

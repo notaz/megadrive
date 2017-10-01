@@ -8,6 +8,7 @@ OBJCOPY = $(CROSS)objcopy
 ASFLAGS += -m68000 --register-prefix-optional --bitwise-or -pic
 ASFLAGS_CC += -Wa,-m68000 -Wa,--register-prefix-optional -Wa,--bitwise-or -Wa,-pic
 CFLAGS += -Wall -g -O2 -m68000 -fomit-frame-pointer
+#CFLAGS += -DPICO
 LDLIBS += $(shell $(CC) -print-file-name=libgcc.a)
 
 TARGET = testpico
