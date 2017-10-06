@@ -5,6 +5,10 @@
     move.l (4 + \arg * 4 + \stacksz)(%sp), \reg
 .endm
 
+.macro ldargw arg, stacksz, reg
+    move.w (4 + \arg * 4 + 2 + \stacksz)(%sp), \reg
+.endm
+
 .global burn10 /* u16 val */
 burn10:
     ldarg       0, 0, d0
@@ -61,6 +65,56 @@ get_input:
 	and.w		d0,d1		/* what changed now */
 .endif
 	rts
+
+.global write_and_read1 /* u32 a, u16 d, void *dst */
+write_and_read1:
+    ldarg       0, 0, a0
+    ldargw      1, 0, d0
+    ldarg       2, 0, a1
+    move.w      d0, (a0)
+    move.l      (a0), d0
+    move.l      (a0), d1
+    move.l      d0, (a1)+
+    move.l      d1, (a1)+
+    rts
+
+.global move_sr /* u16 sr */
+move_sr:
+    ldargw      0, 0, d0
+    move.w      d0, sr
+    rts
+
+.global move_sr_and_read /* u16 sr, u32 a */
+move_sr_and_read:
+    ldargw      0, 0, d0
+    ldarg       1, 0, a0
+    move.w      d0, sr
+    move.w      (a0), d0
+    rts
+
+.global memcpy_ /* void *dst, const void *src, u16 size */
+memcpy_:
+    ldarg       0, 0, a0
+    ldarg       1, 0, a1
+    ldargw      2, 0, d0
+    subq.w      #1, d0
+0:
+    move.b      (a1)+, (a0)+      /* not in a hurry */
+    dbra        d0, 0b
+    rts
+
+.global memset_ /* void *dst, int d, u16 size */
+memset_:
+    ldarg       0, 0, a0
+    ldargw      1, 0, d1
+    ldargw      2, 0, d0
+    subq.w      #1, d0
+0:
+    move.b      d1, (a0)+         /* not in a hurry */
+    dbra        d0, 0b
+    rts
+
+# tests
 
 .global do_vcnt_vb
 do_vcnt_vb:
@@ -126,5 +180,36 @@ do_vcnt_vb:
 
     movem.l     (sp)+, d2-d7/a2
 	rts
+
+.global test_hint
+test_hint:
+    move.w      d0, -(sp)         /*  8 */
+    move.w      (0xc00008).l, d0  /* 16 */
+    addq.w      #1, (0xf000).w    /* 16 */
+    tst.w       (0xf002).w        /* 12 */
+    bne         0f                /* 10 */
+    move.w      d0, (0xf002).w    /* 12 */
+0:
+    move.w      d0, (0xf004).w    /* 12 */
+    move.w      (sp)+, d0         /*  8 */
+    rte                           /* 20 114 */
+.global test_hint_end
+test_hint_end:
+
+.global test_vint
+test_vint:
+    move.w      d0, -(sp)         /*  8 */
+    move.w      (0xc00008).l, d0  /* 16 */
+    addq.w      #1, (0xf008).w    /* 16 */
+    tst.w       (0xf00a).w        /* 12 */
+    bne         0f                /* 10 */
+    move.w      d0, (0xf00a).w    /* 12 */
+0:
+    move.w      d0, (0xf00c).w    /* 12 */
+    move.w      (sp)+, d0         /*  8 */
+    rte                           /* 20 114 */
+.global test_vint_end
+test_vint_end:
+
 
 # vim:filetype=asmM68k:ts=4:sw=4:expandtab

@@ -85,14 +85,13 @@ SECTIONS
     *(.lit)
   } > rom
 
-  .data 0xff0100 :
+  .data 0xff0180 :
   {
     *(.shdata)
     *(.data)
     _edata = .;
   } > ram
 
-  /* .bss 0xff0100 : */
   .bss BLOCK (0x4) :
   {
     __bss_start = . ;

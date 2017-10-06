@@ -2,7 +2,7 @@ exc_tab:
     dc.l     0, 0x200, exc02, exc03, exc04, exc05, exc06, exc07
     dc.l exc08, exc09, exc0a, exc0b, exc0c, exc0d, exc0e, exc0f
     dc.l exc10, exc11, exc12, exc13, exc14, exc15, exc16, exc17
-    dc.l exc18, exc19, exc1a, exc1b, HBL,   exc1d, VBL,   exc1f
+    dc.l exc18, exc19, exc1a, exc1b, 0xff0100, exc1d, 0xff0140, exc1f
     dc.l exc20, exc21, exc22, exc23, exc24, exc25, exc26, exc27
     dc.l exc28, exc29, exc2a, exc2b, exc2c, exc2d, exc2e, exc2f
     dc.l exc30, exc31, exc32, exc33, exc34, exc35, exc3e, exc37

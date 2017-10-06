@@ -1231,6 +1231,127 @@ static int t_tim_vdp_as_cram_w(void)
     return ok;
 }
 
+static int t_irq_hint(void)
+{
+    u16 *ram = (u16 *)0xfff000;
+    u8 *ram8 = (u8 *)0xfff000;
+    u16 v_p, cnt_p;
+    int ok = 1;
+
+    // for more fun, disable the display
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD);
+
+    ram[0] = ram[1] = ram[2] = 0;
+    memcpy_((void *)0xff0100, test_hint, test_hint_end - test_hint);
+    VDP_setReg(10, 0);
+    while (read8(VDP_HV_COUNTER) != 100)
+        ;
+    while (read8(VDP_HV_COUNTER) != 229)
+        ;
+    // take the pending irq
+    VDP_setReg(VDP_MODE1, VDP_MODE1_PS | VDP_MODE1_IE1);
+    move_sr(0x2000);
+    burn10(488 * 2 / 10);
+    move_sr(0x2700);
+    v_p = ram8[2];
+    cnt_p = ram[0];
+    ram[0] = ram[1] = ram[2] = 0;
+    // count irqs
+    move_sr(0x2000);
+    while (read8(VDP_HV_COUNTER) != 3)
+        ;
+    while (read8(VDP_HV_COUNTER) != 228)
+        ;
+    move_sr(0x2700);
+    VDP_setReg(VDP_MODE1, VDP_MODE1_PS);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
+
+    expect(ok, v_p, 229);      // pending irq trigger
+    expect(ok, cnt_p, 1);
+    expect(ok, ram[0], 225);   // count
+    expect(ok, ram8[2], 0);    // first line
+    expect(ok, ram8[4], 224);  // last line
+    return ok;
+}
+
+static int t_irq_ack_v_h(void)
+{
+    u16 *ram = (u16 *)0xfff000;
+    u8 *ram8 = (u8 *)0xfff000;
+    u16 s0, s1, s2;
+    int ok = 1;
+
+    ram[0] = ram[1] = ram[2] =
+    ram[4] = ram[5] = ram[6] = 0;
+    memcpy_((void *)0xff0100, test_hint, test_hint_end - test_hint);
+    memcpy_((void *)0xff0140, test_vint, test_vint_end - test_vint);
+    VDP_setReg(10, 0);
+    VDP_setReg(VDP_MODE1, VDP_MODE1_PS | VDP_MODE1_IE1);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_IE0);
+    while (read8(VDP_HV_COUNTER) != 100)
+        ;
+    while (read8(VDP_HV_COUNTER) != 226)
+        ;
+    s0 = read16(VDP_CTRL_PORT);
+    s1 = move_sr_and_read(0x2500, VDP_CTRL_PORT);
+    burn10(666 / 10);
+    s2 = move_sr_and_read(0x2000, VDP_CTRL_PORT);
+    burn10(488 / 10);
+    move_sr(0x2700);
+    VDP_setReg(VDP_MODE1, VDP_MODE1_PS);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
+
+    expect(ok, ram[4], 1);     // vint count
+    expect(ok, ram8[10], 226); // vint line
+    expect(ok, ram[0], 1);     // hint count
+    expect(ok, ram8[2], 228);  // hint line
+    expect_bits(ok, s0, SR_F, SR_F);
+    expect_bits(ok, s1, 0, SR_F);
+    expect_bits(ok, s2, 0, SR_F);
+    return ok;
+}
+
+static int t_irq_ack_h_v(void)
+{
+    u16 *ram = (u16 *)0xfff000;
+    u8 *ram8 = (u8 *)0xfff000;
+    u16 s0, s1, s[4];
+    int ok = 1;
+
+    ram[0] = ram[1] = ram[2] =
+    ram[4] = ram[5] = ram[6] = 0;
+    memcpy_((void *)0xff0100, test_hint, test_hint_end - test_hint);
+    memcpy_((void *)0xff0140, test_vint, test_vint_end - test_vint);
+    VDP_setReg(10, 0);
+    while (read8(VDP_HV_COUNTER) != 100)
+        ;
+    while (read8(VDP_HV_COUNTER) != 226)
+        ;
+    s0 = read16(VDP_CTRL_PORT);
+    VDP_setReg(VDP_MODE1, VDP_MODE1_PS | VDP_MODE1_IE1);
+    move_sr(0x2000);
+    burn10(666 / 10);
+    s1 = read16(VDP_CTRL_PORT);
+    write_and_read1(VDP_CTRL_PORT, 0x8000 | (VDP_MODE2 << 8)
+                     | VDP_MODE2_MD | VDP_MODE2_IE0, s);
+    burn10(488 / 10);
+    move_sr(0x2700);
+    VDP_setReg(VDP_MODE1, VDP_MODE1_PS);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
+
+    expect(ok, ram[0], 1);     // hint count
+    expect(ok, ram8[2], 226);  // hint line
+    expect(ok, ram[4], 1);     // vint count
+    expect(ok, ram8[10], 228); // vint line
+    expect_bits(ok, s0, SR_F, SR_F);
+    expect_bits(ok, s1, SR_F, SR_F);
+    expect_bits(ok, s[0], SR_F, SR_F);
+    expect_bits(ok, s[1], SR_F, SR_F);
+    expect_bits(ok, s[2], 0, SR_F);
+    expect_bits(ok, s[3], 0, SR_F);
+    return ok;
+}
+
 static const struct {
     int (*test)(void);
     const char *name;
@@ -1266,6 +1387,9 @@ static const struct {
     { t_tim_vcnt,            "time V counter" },
     { t_tim_vdp_as_vram_w,   "time vdp vram w" },
     { t_tim_vdp_as_cram_w,   "time vdp cram w" },
+    { t_irq_hint,            "irq4 / line" },
+    { t_irq_ack_v_h,         "irq ack v-h" },
+    { t_irq_ack_h_v,         "irq ack h-v" },
 };
 
 static void setup_z80(void)
