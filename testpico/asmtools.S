@@ -70,10 +70,17 @@ get_input:
 write_and_read1:
     ldarg       0, 0, a0
     ldargw      1, 0, d0
-    ldarg       2, 0, a1
+#ifndef PICO
     move.w      d0, (a0)
+#else
+    movea.l     a0, a1
+    subq.l      #1, a1
+    move.w      d0, 1(a1)
+#endif
     move.l      (a0), d0
     move.l      (a0), d1
+
+    ldarg       2, 0, a1
     move.l      d0, (a1)+
     move.l      d1, (a1)+
     rts
@@ -116,8 +123,8 @@ memset_:
 
 # tests
 
-.global do_vcnt_vb
-do_vcnt_vb:
+.global test_vcnt_vb
+test_vcnt_vb:
     movem.l     d2-d7/a2, -(sp)
     movea.l     #0xc00007, a0
     movea.l     #0xc00008, a1
@@ -211,5 +218,108 @@ test_vint:
 .global test_vint_end
 test_vint_end:
 
+# some nastyness from Fatal Rewind
+.global test_h_v_2
+test_h_v_2:
+    move.w      #0x2000, sr
+    move.w      #0x8014, (0xFFC00004).l
+    move.w      #0x8164, (0xFFC00004).l
+    move.w      #1, d0
+0:
+    dbra        d0, 0b
+    move.w      #0x2700, sr
+    rts
+
+.global test_v_h_2
+test_v_h_2:
+    move.w      #0x2000, sr
+    movea.l     #0xc00004, a0
+    move.w      #0x8164, (a0)
+    move.w      #0x8144, (a0)
+    move.w      #480/2/10-1, d0
+0:
+    dbra        d0, 0b
+    move.w      #0x8164, (0xFFC00004).l
+    move.w      #0x8014, (0xFFC00004).l
+    move.w      #0x2700, sr
+    rts
+
+.global test_f_vint
+test_f_vint:
+    move.w      (a1), d0
+    rte
+.global test_f_vint_end
+test_f_vint_end:
+
+.global test_f
+test_f:
+    movea.l     #0xc00005, a0
+    movea.l     #0xc00004, a1
+    move.w      #0x2000, sr
+0:
+    btst        #3, (a0)
+    bne         0b
+0:
+    btst        #3, (a0)
+    beq         0b
+    movem.l     d2-d7/a2, -(sp)
+    move.l      (a1), d1
+    move.l      (a1), d2
+    move.l      (a1), d3
+    move.l      (a1), d4
+    move.l      (a1), d5
+    move.l      (a1), d6
+    move.w      #0x2700, sr
+    movea.l     #0xff0000, a0
+    move.b      d0, (a0)+
+    move.b      #0, (a0)+
+.macro test_lb_s sr, dr
+    swap        \sr
+    move.b      \sr, (\dr)+
+    swap        \sr
+    move.b      \sr, (\dr)+
+.endm
+    test_lb_s   d1, a0
+    test_lb_s   d2, a0
+    test_lb_s   d3, a0
+    test_lb_s   d4, a0
+    test_lb_s   d5, a0
+    movem.l     (sp)+, d2-d7/a2
+	rts
+
+.global test_hb
+test_hb:
+    movem.l     d2-d7, -(sp)
+    movea.l     #0xc00004, a0
+    movea.l     #0xc00008, a1
+    moveq.l     #1, d0
+0:
+    cmp.b       (a1), d0
+    beq         0b
+0:
+    cmp.b       (a1), d0
+    bne         0b
+    move.l      (a0), d0
+    move.l      (a0), d1
+    move.l      (a0), d2
+    movea.l     #0xff0000, a1
+    movea.l     #0xff0000, a1
+    nop
+    nop
+    move.l      (a0), d3
+    move.l      (a0), d4
+    move.l      (a0), d5
+    move.l      (a0), d6
+    move.l      (a0), d7
+    test_lb_s   d0, a1
+    test_lb_s   d1, a1
+    test_lb_s   d2, a1
+    test_lb_s   d3, a1
+    test_lb_s   d4, a1
+    test_lb_s   d5, a1
+    test_lb_s   d6, a1
+    test_lb_s   d7, a1
+    movem.l     (sp)+, d2-d7
+	rts
 
 # vim:filetype=asmM68k:ts=4:sw=4:expandtab

@@ -18,9 +18,15 @@ short move_sr_and_read(unsigned short sr, unsigned int a);
 void  memcpy_(void *dst, const void *src, unsigned short size);
 void  memset_(void *dst, int d, unsigned short size);
 
-void  do_vcnt_vb(void);
+void test_vcnt_vb(void);
+void test_f(void);
+void test_hb(void);
+void test_v_h_2(void);
+void test_h_v_2(void);
 
 extern const char test_hint[];
 extern const char test_hint_end[];
 extern const char test_vint[];
 extern const char test_vint_end[];
+extern const char test_f_vint[];
+extern const char test_f_vint_end[];

@@ -31,7 +31,7 @@ fill: fill.c
 	$(HOSTCC) -o $@ $^ -Wall -O2
 
 %.o: %.S
-	$(CC) -c -o $@ $^ $(ASFLAGS_CC)
+	$(CC) -c -o $@ $^ $(CFLAGS) $(ASFLAGS_CC)
 
 %.bin80: %.s80
 	sjasm $< $@

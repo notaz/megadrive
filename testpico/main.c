@@ -635,6 +635,7 @@ static int t_dma_short_cmd(void)
     write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0xfff0));
     write32(VDP_DATA_PORT, 0x20212223);
     write32(VDP_DATA_PORT, 0x30313233);
+    vdp_wait_for_fifo_empty();
 
     do_setup_dma(src, 2);
     write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0xfff0) | CTL_WRITE_DMA);
@@ -662,6 +663,7 @@ static int t_dma_fill3_odd(void)
     write32(VDP_DATA_PORT, 0);
     write32(VDP_DATA_PORT, 0);
     write32(VDP_DATA_PORT, 0);
+    vdp_wait_for_fifo_empty();
 
     VDP_setReg(VDP_AUTOINC, 3);
     VDP_setReg(VDP_DMA_LEN0, 3);
@@ -691,6 +693,7 @@ static int t_dma_fill3_even(void)
     write32(VDP_DATA_PORT, 0);
     write32(VDP_DATA_PORT, 0);
     write32(VDP_DATA_PORT, 0);
+    vdp_wait_for_fifo_empty();
 
     VDP_setReg(VDP_AUTOINC, 3);
     VDP_setReg(VDP_DMA_LEN0, 3);
@@ -924,6 +927,29 @@ static int t_vdp_reg_cmd(void)
     return ok;
 }
 
+static int t_vdp_sr_vb(void)
+{
+    u16 sr[4];
+    int ok = 1;
+
+    while (read8(VDP_HV_COUNTER) != 242)
+        ;
+    sr[0] = read16(VDP_CTRL_PORT);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD);
+    sr[1] = read16(VDP_CTRL_PORT);
+    while (read8(VDP_HV_COUNTER) != 4)
+        ;
+    sr[2] = read16(VDP_CTRL_PORT);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
+    sr[3] = read16(VDP_CTRL_PORT);
+
+    expect_bits(ok, sr[0], SR_VB, SR_VB);
+    expect_bits(ok, sr[1], SR_VB, SR_VB);
+    expect_bits(ok, sr[2], SR_VB, SR_VB);
+    expect_bits(ok, sr[3], 0, SR_VB);
+    return ok;
+}
+
 /* z80 tests assume busreq state */
 static int t_z80mem_long_mirror(void)
 {
@@ -1127,7 +1153,7 @@ static int t_tim_z80_bank_rom(void)
 
 /* borderline too slow */
 #if 0
-static void do_vcnt_vb(void)
+static void test_vcnt_vb(void)
 {
     const u32 *srhv = (u32 *)0xc00006; // to read SR and HV counter
     u32 *ram = (u32 *)0xff0000;
@@ -1174,7 +1200,7 @@ static int t_tim_vcnt(void)
     u16 lines = pal ? 313 : 262;
     int ok = 1;
 
-    do_vcnt_vb();
+    test_vcnt_vb();
     expect(ok, ram[0*4+2], 0); // line 0
     expect_bits(ok, ram[0*4+1], 0, SR_VB);
     expect(ok, ram[1*4+2], 223); // last no blank
@@ -1192,6 +1218,45 @@ static int t_tim_vcnt(void)
     expect(ok, ram[7*4+2], 0); // next line 0
     expect_bits(ok, ram[7*4+1], 0, SR_VB);
     expect(ok, ram32[8], lines - 1);
+    return ok;
+}
+
+static int t_tim_hblank_h40(void)
+{
+    const u8 *r = (u8 *)0xff0000;
+    int ok = 1;
+
+    test_hb();
+
+    // set: 0-2
+    expect_bits(ok, r[2], SR_HB, SR_HB);
+    expect_bits(ok, r[5], SR_HB, SR_HB);
+    // <wait>
+    expect_bits(ok, r[7], SR_HB, SR_HB);
+    // clear: 8-11
+    expect_bits(ok, r[12], 0, SR_HB);
+    return ok;
+}
+
+static int t_tim_hblank_h32(void)
+{
+    const u8 *r = (u8 *)0xff0000;
+    int ok = 1;
+
+    VDP_setReg(VDP_MODE4, 0x00);
+    test_hb();
+    VDP_setReg(VDP_MODE4, 0x81);
+
+#ifndef PICO
+    expect_bits(ok, r[0], 0, SR_HB);
+#endif
+    // set: 1-4
+    expect_bits(ok, r[4], SR_HB, SR_HB);
+    expect_bits(ok, r[5], SR_HB, SR_HB);
+    // <wait>
+    expect_bits(ok, r[8], SR_HB, SR_HB);
+    // clear: 9-11
+    expect_bits(ok, r[12], 0, SR_HB);
     return ok;
 }
 
@@ -1258,7 +1323,7 @@ static int t_irq_hint(void)
     ram[0] = ram[1] = ram[2] = 0;
     // count irqs
     move_sr(0x2000);
-    while (read8(VDP_HV_COUNTER) != 3)
+    while (read8(VDP_HV_COUNTER) != 4)
         ;
     while (read8(VDP_HV_COUNTER) != 228)
         ;
@@ -1311,6 +1376,37 @@ static int t_irq_ack_v_h(void)
     return ok;
 }
 
+static int t_irq_ack_v_h_2(void)
+{
+    u16 *ram = (u16 *)0xfff000;
+    u8 *ram8 = (u8 *)0xfff000;
+    u16 s0, s1;
+    int ok = 1;
+
+    ram[0] = ram[1] = ram[2] =
+    ram[4] = ram[5] = ram[6] = 0;
+    memcpy_((void *)0xff0100, test_hint, test_hint_end - test_hint);
+    memcpy_((void *)0xff0140, test_vint, test_vint_end - test_vint);
+    VDP_setReg(10, 0);
+    while (read8(VDP_HV_COUNTER) != 100)
+        ;
+    while (read8(VDP_HV_COUNTER) != 226)
+        ;
+    s0 = read16(VDP_CTRL_PORT);
+    test_v_h_2();
+    s1 = read16(VDP_CTRL_PORT);
+    VDP_setReg(VDP_MODE1, VDP_MODE1_PS);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
+
+    expect(ok, ram[4], 2);     // vint count
+    expect(ok, ram8[10], 226); // vint line
+    expect(ok, ram[0], 1);     // hint count
+    expect(ok, ram8[2], 227);  // hint line
+    expect_bits(ok, s0, SR_F, SR_F);
+    expect_bits(ok, s1, 0, SR_F);
+    return ok;
+}
+
 static int t_irq_ack_h_v(void)
 {
     u16 *ram = (u16 *)0xfff000;
@@ -1334,7 +1430,6 @@ static int t_irq_ack_h_v(void)
     s1 = read16(VDP_CTRL_PORT);
     write_and_read1(VDP_CTRL_PORT, 0x8000 | (VDP_MODE2 << 8)
                      | VDP_MODE2_MD | VDP_MODE2_IE0, s);
-    burn10(488 / 10);
     move_sr(0x2700);
     VDP_setReg(VDP_MODE1, VDP_MODE1_PS);
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
@@ -1349,6 +1444,88 @@ static int t_irq_ack_h_v(void)
     expect_bits(ok, s[1], SR_F, SR_F);
     expect_bits(ok, s[2], 0, SR_F);
     expect_bits(ok, s[3], 0, SR_F);
+    return ok;
+}
+
+static int t_irq_ack_h_v_2(void)
+{
+    u16 *ram = (u16 *)0xfff000;
+    u8 *ram8 = (u8 *)0xfff000;
+    u16 s0, s1;
+    int ok = 1;
+
+    ram[0] = ram[1] = ram[2] =
+    ram[4] = ram[5] = ram[6] = 0;
+    memcpy_((void *)0xff0100, test_hint, test_hint_end - test_hint);
+    memcpy_((void *)0xff0140, test_vint, test_vint_end - test_vint);
+    VDP_setReg(10, 0);
+    while (read8(VDP_HV_COUNTER) != 100)
+        ;
+    while (read8(VDP_HV_COUNTER) != 226)
+        ;
+    s0 = read16(VDP_CTRL_PORT);
+    test_h_v_2();
+    s1 = read16(VDP_CTRL_PORT);
+    VDP_setReg(VDP_MODE1, VDP_MODE1_PS);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
+
+    expect(ok, ram[0], 2);     // hint count
+    expect(ok, ram8[2], 226);  // hint first line
+    expect(ok, ram8[4], 226);  // hint last line
+    expect(ok, ram[4], 0);     // vint count
+    expect(ok, ram8[10], 0);   // vint line
+    expect_bits(ok, s0, SR_F, SR_F);
+    expect_bits(ok, s1, 0, SR_F);
+    return ok;
+}
+
+static void t_irq_f_flag(void)
+{
+    memcpy_((void *)0xff0140, test_f_vint, test_f_vint_end - test_f_vint);
+    memset_((void *)0xff0000, 0, 10);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_IE0 | VDP_MODE2_DISP);
+    test_f();
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
+}
+
+static int t_irq_f_flag_h40(void)
+{
+    u8 f, *r = (u8 *)0xff0000;
+    int ok = 1;
+
+    t_irq_f_flag();
+
+    expect_bits(ok, r[0], 0, SR_F);
+    expect_bits(ok, r[1], 0, SR_F);
+    expect_bits(ok, r[2], 0, SR_F);
+    // hits 1-3 times in range 3-9, usually ~5
+    f = r[3] | r[4] | r[5] | r[6] | r[7];
+
+    expect_bits(ok, r[10], 0, SR_F);
+    expect_bits(ok, r[11], 0, SR_F);
+    expect_bits(ok, f, SR_F, SR_F);
+    return ok;
+}
+
+static int t_irq_f_flag_h32(void)
+{
+    u8 f, *r = (u8 *)0xff0000;
+    int ok = 1;
+
+    VDP_setReg(VDP_MODE4, 0x00);
+    t_irq_f_flag();
+    VDP_setReg(VDP_MODE4, 0x81);
+
+    expect_bits(ok, r[0], 0, SR_F);
+    expect_bits(ok, r[1], 0, SR_F);
+    // hits 1-3 times in range 2-7, usually 3
+    f = r[2] | r[3] | r[4] | r[5] | r[6] | r[7];
+
+    expect_bits(ok, r[8], 0, SR_F);
+    expect_bits(ok, r[9], 0, SR_F);
+    expect_bits(ok, r[10], 0, SR_F);
+    expect_bits(ok, r[11], 0, SR_F);
+    expect_bits(ok, f, SR_F, SR_F);
     return ok;
 }
 
@@ -1375,6 +1552,7 @@ static const struct {
     { t_vdp_128k_b16,        "vdp 128k addr bit16" },
     // { t_vdp_128k_b16_inc,    "vdp 128k bit16 inc" }, // mystery
     { t_vdp_reg_cmd,         "vdp reg w cmd reset" },
+    { t_vdp_sr_vb,           "vdp status reg vb" },
     { t_z80mem_long_mirror,  "z80 ram long mirror" },
     { t_z80mem_noreq_w,      "z80 ram noreq write" },
     { t_z80mem_vdp_r,        "z80 vdp read" },
@@ -1385,11 +1563,17 @@ static const struct {
     { t_tim_z80_vdp,         "time z80 vdp" },
     { t_tim_z80_bank_rom,    "time z80 bank rom" },
     { t_tim_vcnt,            "time V counter" },
+    { t_tim_hblank_h40,      "time hblank h40" },
+    { t_tim_hblank_h32,      "time hblank h32" },
     { t_tim_vdp_as_vram_w,   "time vdp vram w" },
     { t_tim_vdp_as_cram_w,   "time vdp cram w" },
     { t_irq_hint,            "irq4 / line" },
     { t_irq_ack_v_h,         "irq ack v-h" },
+    { t_irq_ack_v_h_2,       "irq ack v-h 2" },
     { t_irq_ack_h_v,         "irq ack h-v" },
+    { t_irq_ack_h_v_2,       "irq ack h-v 2" },
+    { t_irq_f_flag_h40,      "irq f flag h40" },
+    { t_irq_f_flag_h32,      "irq f flag h32" },
 };
 
 static void setup_z80(void)
@@ -1432,7 +1616,7 @@ static void wait_next_vsync(void)
         /* not blanking */;
 }
 
-static int hexinc(char *c)
+static unused int hexinc(char *c)
 {
     (*c)++;
     if (*c > 'f') {
@@ -1554,6 +1738,14 @@ int main()
 
         write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(APLANE));
 
+#if 0
+        for (i = 0, c[0] = 'a'; i < 8 * 1024 / 2; i++) {
+            write16(VDP_DATA_PORT, (u16)c[0] - 32 + TILE_FONT_BASE / 32);
+            c[0]++;
+            if (c[0] == 'z' + 1)
+                c[0] = 'a';
+        }
+#else
         for (i = 0; i < 8 * 1024 / 2 / 4; i++) {
             write16(VDP_DATA_PORT, (u16)'.'  - 32 + TILE_FONT_BASE / 32);
             write16(VDP_DATA_PORT, (u16)c[2] - 32 + TILE_FONT_BASE / 32);
@@ -1563,6 +1755,7 @@ int main()
                 if (hexinc(&c[1]))
                     hexinc(&c[2]);
         }
+#endif
         while (get_input() & BTNM_A)
             wait_next_vsync();
 
