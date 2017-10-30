@@ -13,9 +13,9 @@ exc_tab:
     .ascii "MEGA-ED host                                    "
     .ascii "GM 00000000-00"
     .byte 0x00,0x00
-    .ascii "JD              "
-    .byte 0x00,0x00,0x00,0x00,0x00,0x02,0x00,0x00
-    .byte 0x00,0xff,0x00,0x00,0xff,0xff,0xff,0xff
+    .ascii "J               "
+    dc.l  0x000000,0x1fffff
+    dc.l  0xff0000,0xffffff
     .ascii "               "
     .ascii "                        "
     .ascii "                         "
