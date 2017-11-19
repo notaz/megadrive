@@ -151,6 +151,7 @@ static int write_with_check(int fd, const void *data, size_t size, char chk)
 
 static int send_file(int fd, const char *fname, const char *cmd)
 {
+	unsigned char blocks_b;
 	char buf[0x10000];
 	int retval = -1;
 	FILE *f = NULL;
@@ -181,9 +182,10 @@ static int send_file(int fd, const char *fname, const char *cmd)
 		blocksz = sizeof(buf);
 
 	blocks = (size + blocksz - 1) / blocksz;
+	blocks_b = blocks;
 
 	send_cmd(fd, cmd);
-	ret = write_with_check(fd, &blocks, 1, 'k');
+	ret = write_with_check(fd, &blocks_b, 1, 'k');
 	if (ret)
 		return ret;
 
