@@ -4,20 +4,7 @@
  */
 #include <stdlib.h>
 #include <stdarg.h>
-
-#define u8      unsigned char
-#define u16     unsigned short
-#define u32     unsigned int
-
-#define noinline __attribute__((noinline))
-#define unused   __attribute__((unused))
-#define _packed  __attribute__((packed))
-
-#define mem_barrier() \
-    asm volatile("":::"memory")
-
-#define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
-
+#include "common.h"
 #include "asmtools.h"
 
 #define VDP_DATA_PORT    0xC00000
@@ -35,19 +22,6 @@
 #define SLIST            (TILE_MEM_END + 0x0C00)
 #define APLANE           (TILE_MEM_END + 0x1000)
 #define BPLANE           (TILE_MEM_END + 0x3000)
-
-#define read8(a) \
-    *((volatile u8 *) (a))
-#define read16(a) \
-    *((volatile u16 *) (a))
-#define read32(a) \
-    *((volatile u32 *) (a))
-#define write8(a, d) \
-    *((volatile u8 *) (a)) = (d)
-#define write16(a, d) \
-    *((volatile u16 *) (a)) = (d)
-#define write32(a, d) \
-    *((volatile u32 *) (a)) = (d)
 
 #define write16_z80le(a, d) \
     ((volatile u8 *)(a))[0] = (u8)(d), \
@@ -335,8 +309,6 @@ struct exc_frame {
         } bae _packed; // bus/address error frame
     };
 } _packed;
-
-int xtttt(void) { return sizeof(struct exc_frame); }
 
 void exception(const struct exc_frame *f)
 {
@@ -1529,51 +1501,148 @@ static int t_irq_f_flag_h32(void)
     return ok;
 }
 
+// 32X
+
+static int t_32x_init(void)
+{
+    void (*do_32x_enable)(void) = (void *)0xff0040;
+    u32 M_OK = MKLONG('M','_','O','K');
+    u32 S_OK = MKLONG('S','_','O','K');
+    u32 *r = (u32 *)0xa15100;
+    u16 *r16 = (u16 *)r;
+    int ok = 1;
+
+    expect(ok, r16[0x00/2], 0x82);
+    expect(ok, r16[0x02/2], 0);
+    expect(ok, r16[0x04/2], 0);
+    expect(ok, r16[0x06/2], 0);
+    expect(ok, r[0x14/4], 0);
+    expect(ok, r[0x18/4], 0);
+    expect(ok, r[0x1c/4], 0);
+    write32(&r[0x20/4], 0); // master resp
+    write32(&r[0x24/4], 0); // slave resp
+
+    // could just set RV, but BIOS reads ROM, so can't
+    memcpy_(do_32x_enable, x32x_enable,
+            x32x_enable_end - x32x_enable);
+    do_32x_enable();
+
+    expect(ok, r16[0x00/2], 0x83);
+    expect(ok, r16[0x02/2], 0);
+    expect(ok, r16[0x04/2], 0);
+    expect(ok, r16[0x06/2], 1); // RV
+    expect(ok, r[0x14/4], 0);
+    expect(ok, r[0x18/4], 0);
+    expect(ok, r[0x1c/4], 0);
+    expect(ok, r[0x20/4], M_OK);
+    while (!read16(&r16[0x24/2]))
+        ;
+    expect(ok, r[0x24/4], S_OK);
+    return ok;
+}
+
+static void x32_cmd(enum x32x_cmd cmd, u16 is_slave)
+{
+    u16 v, *r = (u16 *)0xa15120;
+    u16 cmd_s = cmd | (is_slave << 15);
+    write16(r, cmd_s);
+    mem_barrier();
+    while ((v = read16(r)) == cmd_s)
+        burn10(1);
+    if (v != 0)
+        printf("cmd clr: %x\n", v);
+}
+
+static int t_32x_echo(void)
+{
+    u16 *r = (u16 *)0xa15120;
+    int ok = 1;
+
+    write16(&r[0x02/2], 0x1234);
+    x32_cmd(CMD_ECHO, 0);
+    expect(ok, r[0x04/2], 0x1234);
+    write16(&r[0x02/2], 0x2345);
+    // mysteriously broken (random hangs)
+    //x32_cmd(CMD_ECHO, 1);
+    //expect(ok, r[0x04/2], 0x8345);
+    return ok;
+}
+
+static int t_32x_md_rom(void)
+{
+    u32 *rl = (u32 *)0;
+    int ok = 1;
+
+    expect(ok, rl[0x004/4], 0x880200);
+    expect(ok, rl[0x100/4], 0x53454741);
+    expect(ok, rl[0x70/4], 0);
+    write32(&rl[0x70/4], ~0);
+    write32(&rl[0x78/4], ~0);
+    mem_barrier();
+    expect(ok, rl[0x70/4], ~0);
+    expect(ok, rl[0x78/4], 0x8802ae);
+    // not tested: with RV 0x880000/0x900000 hangs
+    return ok;
+}
+
+enum {
+    T_MD = 0,
+    T_32 = 1, // 32X
+};
+
 static const struct {
+    u8 type;
     int (*test)(void);
     const char *name;
 } g_tests[] = {
-    { t_dma_zero_wrap,       "dma zero len + wrap" },
-    { t_dma_zero_fill,       "dma zero len + fill" },
-    { t_dma_ram_wrap,        "dma ram wrap" },
-    { t_dma_multi,           "dma multi" },
-    { t_dma_cram_wrap,       "dma cram wrap" },
-    { t_dma_vsram_wrap,      "dma vsram wrap" },
-    { t_dma_and_data,        "dma and data" },
-    { t_dma_short_cmd,       "dma short cmd" },
-    { t_dma_fill3_odd,       "dma fill3 odd" },
-    { t_dma_fill3_even,      "dma fill3 even" },
+#if 0
+    { T_MD, t_dma_zero_wrap,       "dma zero len + wrap" },
+    { T_MD, t_dma_zero_fill,       "dma zero len + fill" },
+    { T_MD, t_dma_ram_wrap,        "dma ram wrap" },
+    { T_MD, t_dma_multi,           "dma multi" },
+    { T_MD, t_dma_cram_wrap,       "dma cram wrap" },
+    { T_MD, t_dma_vsram_wrap,      "dma vsram wrap" },
+    { T_MD, t_dma_and_data,        "dma and data" },
+    { T_MD, t_dma_short_cmd,       "dma short cmd" },
+    { T_MD, t_dma_fill3_odd,       "dma fill3 odd" },
+    { T_MD, t_dma_fill3_even,      "dma fill3 even" },
 #ifndef PICO // later
-    { t_dma_fill3_vsram,     "dma fill3 vsram" },
+    { T_MD, t_dma_fill3_vsram,     "dma fill3 vsram" },
 #endif
-    { t_dma_fill_dis,        "dma fill disabled" },
-    { t_dma_fill_src,        "dma fill src incr" },
-    { t_dma_128k,            "dma 128k mode" },
-    { t_vdp_128k_b16,        "vdp 128k addr bit16" },
+    { T_MD, t_dma_fill_dis,        "dma fill disabled" },
+    { T_MD, t_dma_fill_src,        "dma fill src incr" },
+    { T_MD, t_dma_128k,            "dma 128k mode" },
+    { T_MD, t_vdp_128k_b16,        "vdp 128k addr bit16" },
     // { t_vdp_128k_b16_inc,    "vdp 128k bit16 inc" }, // mystery
-    { t_vdp_reg_cmd,         "vdp reg w cmd reset" },
-    { t_vdp_sr_vb,           "vdp status reg vb" },
-    { t_z80mem_long_mirror,  "z80 ram long mirror" },
-    { t_z80mem_noreq_w,      "z80 ram noreq write" },
-    { t_z80mem_vdp_r,        "z80 vdp read" },
+    { T_MD, t_vdp_reg_cmd,         "vdp reg w cmd reset" },
+    { T_MD, t_vdp_sr_vb,           "vdp status reg vb" },
+    { T_MD, t_z80mem_long_mirror,  "z80 ram long mirror" },
+    { T_MD, t_z80mem_noreq_w,      "z80 ram noreq write" },
+    { T_MD, t_z80mem_vdp_r,        "z80 vdp read" },
     // { t_z80mem_vdp_w,        "z80 vdp write" }, // hang
-    { t_tim_loop,            "time loop" },
-    { t_tim_z80_ram,         "time z80 ram" },
-    { t_tim_z80_ym,          "time z80 ym2612" },
-    { t_tim_z80_vdp,         "time z80 vdp" },
-    { t_tim_z80_bank_rom,    "time z80 bank rom" },
-    { t_tim_vcnt,            "time V counter" },
-    { t_tim_hblank_h40,      "time hblank h40" },
-    { t_tim_hblank_h32,      "time hblank h32" },
-    { t_tim_vdp_as_vram_w,   "time vdp vram w" },
-    { t_tim_vdp_as_cram_w,   "time vdp cram w" },
-    { t_irq_hint,            "irq4 / line" },
-    { t_irq_ack_v_h,         "irq ack v-h" },
-    { t_irq_ack_v_h_2,       "irq ack v-h 2" },
-    { t_irq_ack_h_v,         "irq ack h-v" },
-    { t_irq_ack_h_v_2,       "irq ack h-v 2" },
-    { t_irq_f_flag_h40,      "irq f flag h40" },
-    { t_irq_f_flag_h32,      "irq f flag h32" },
+    { T_MD, t_tim_loop,            "time loop" },
+    { T_MD, t_tim_z80_ram,         "time z80 ram" },
+    { T_MD, t_tim_z80_ym,          "time z80 ym2612" },
+    { T_MD, t_tim_z80_vdp,         "time z80 vdp" },
+    { T_MD, t_tim_z80_bank_rom,    "time z80 bank rom" },
+    { T_MD, t_tim_vcnt,            "time V counter" },
+    { T_MD, t_tim_hblank_h40,      "time hblank h40" },
+    { T_MD, t_tim_hblank_h32,      "time hblank h32" },
+    { T_MD, t_tim_vdp_as_vram_w,   "time vdp vram w" },
+    { T_MD, t_tim_vdp_as_cram_w,   "time vdp cram w" },
+    { T_MD, t_irq_hint,            "irq4 / line" },
+    { T_MD, t_irq_ack_v_h,         "irq ack v-h" },
+    { T_MD, t_irq_ack_v_h_2,       "irq ack v-h 2" },
+    { T_MD, t_irq_ack_h_v,         "irq ack h-v" },
+    { T_MD, t_irq_ack_h_v_2,       "irq ack h-v 2" },
+    { T_MD, t_irq_f_flag_h40,      "irq f flag h40" },
+#endif
+    { T_MD, t_irq_f_flag_h32,      "irq f flag h32" },
+
+    // the first one enables 32X, so should be kept
+    { T_32, t_32x_init,            "32x init" },
+    { T_32, t_32x_echo,            "32x echo" },
+    { T_32, t_32x_md_rom,          "32x rom" },
 };
 
 static void setup_z80(void)
@@ -1631,6 +1700,8 @@ static unused int hexinc(char *c)
 int main()
 {
     int passed = 0;
+    int skipped = 0;
+    int have_32x;
     int ret;
     u8 v8;
     int i;
@@ -1696,10 +1767,12 @@ int main()
 
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
 
+    have_32x = read32(0xa130ec) == MKLONG('M','A','R','S');
     v8 = read8(0xa10001);
-    printf("MD version: %02x %s %s\n", v8,
+    printf("MD version: %02x %s %s %s\n", v8,
         (v8 & 0x80) ? "world" : "jap",
-        (v8 & 0x40) ? "pal" : "ntsc");
+        (v8 & 0x40) ? "pal" : "ntsc",
+        have_32x ? "32X" : "");
 
     for (i = 0; i < ARRAY_SIZE(g_tests); i++) {
         // print test number if we haven't scrolled away
@@ -1709,6 +1782,10 @@ int main()
             printf("%02d/%02d", i, ARRAY_SIZE(g_tests));
             printf_ypos = old_ypos;
             printf_xpos = 0;
+        }
+        if ((g_tests[i].type & T_32) && !have_32x) {
+            skipped++;
+            continue;
         }
         ret = g_tests[i].test();
         if (ret != 1) {
@@ -1721,7 +1798,8 @@ int main()
     }
 
     text_pal = 0;
-    printf("%d/%d passed.\n", passed, ARRAY_SIZE(g_tests));
+    printf("%d/%d passed, %d skipped.\n",
+           passed, ARRAY_SIZE(g_tests), skipped);
 
     printf_ypos = 0;
     printf("     ");

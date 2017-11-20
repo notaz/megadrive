@@ -1,0 +1,170 @@
+
+        .text
+
+! Master Vector Base Table at 0x06000000
+
+        .long   mstart      /* Cold Start PC */
+        .long   0x06040000  /* Cold Start SP */
+        .long   mstart      /* Manual Reset PC */
+        .long   0x06040000  /* Manual Reset SP */
+        .long   main_err    /* Illegal instruction */
+        .long   0x00000000  /* reserved */
+        .long   main_err    /* Invalid slot instruction */
+        .long   0x20100400  /* reserved */
+        .long   0x20100420  /* reserved */
+        .long   main_err    /* CPU address error */
+        .long   main_err    /* DMA address error */
+        .long   main_err    /* NMI vector */
+        .long   main_err    /* User break vector */
+        .space  76          /* reserved */
+        .long   main_err    /* TRAPA #32 */
+        .long   main_err    /* TRAPA #33 */
+        .long   main_err    /* TRAPA #34 */
+        .long   main_err    /* TRAPA #35 */
+        .long   main_err    /* TRAPA #36 */
+        .long   main_err    /* TRAPA #37 */
+        .long   main_err    /* TRAPA #38 */
+        .long   main_err    /* TRAPA #39 */
+        .long   main_err    /* TRAPA #40 */
+        .long   main_err    /* TRAPA #41 */
+        .long   main_err    /* TRAPA #42 */
+        .long   main_err    /* TRAPA #43 */
+        .long   main_err    /* TRAPA #44 */
+        .long   main_err    /* TRAPA #45 */
+        .long   main_err    /* TRAPA #46 */
+        .long   main_err    /* TRAPA #47 */
+        .long   main_err    /* TRAPA #48 */
+        .long   main_err    /* TRAPA #49 */
+        .long   main_err    /* TRAPA #50 */
+        .long   main_err    /* TRAPA #51 */
+        .long   main_err    /* TRAPA #52 */
+        .long   main_err    /* TRAPA #53 */
+        .long   main_err    /* TRAPA #54 */
+        .long   main_err    /* TRAPA #55 */
+        .long   main_err    /* TRAPA #56 */
+        .long   main_err    /* TRAPA #57 */
+        .long   main_err    /* TRAPA #58 */
+        .long   main_err    /* TRAPA #59 */
+        .long   main_err    /* TRAPA #60 */
+        .long   main_err    /* TRAPA #61 */
+        .long   main_err    /* TRAPA #62 */
+        .long   main_err    /* TRAPA #63 */
+        .long   main_irq    /* Level 1 IRQ */
+        .long   main_irq    /* Level 2 & 3 IRQ's */
+        .long   main_irq    /* Level 4 & 5 IRQ's */
+        .long   main_irq    /* PWM interupt */
+        .long   main_irq    /* Command interupt */
+        .long   main_irq    /* H Blank interupt */
+        .long   main_irq    /* V Blank interupt */
+        .long   main_irq    /* Reset Button */
+        .long   main_irq    /* DMA1 TE INT */
+
+! Slave Vector Base Table at 0x06000124
+
+        .long   sstart      /* Cold Start PC */
+        .long   0x0603f800  /* Cold Start SP */
+        .long   sstart      /* Manual Reset PC */
+        .long   0x0603f800  /* Manual Reset SP */
+        .long   slav_err    /* Illegal instruction */
+        .long   0x00000000  /* reserved */
+        .long   slav_err    /* Invalid slot instruction */
+        .long   0x20100400  /* reserved */
+        .long   0x20100420  /* reserved */
+        .long   slav_err    /* CPU address error */
+        .long   slav_err    /* DMA address error */
+        .long   slav_err    /* NMI vector */
+        .long   slav_err    /* User break vector */
+        .space  76          /* reserved */
+        .long   slav_err    /* TRAPA #32 */
+        .long   slav_err    /* TRAPA #33 */
+        .long   slav_err    /* TRAPA #34 */
+        .long   slav_err    /* TRAPA #35 */
+        .long   slav_err    /* TRAPA #36 */
+        .long   slav_err    /* TRAPA #37 */
+        .long   slav_err    /* TRAPA #38 */
+        .long   slav_err    /* TRAPA #39 */
+        .long   slav_err    /* TRAPA #40 */
+        .long   slav_err    /* TRAPA #41 */
+        .long   slav_err    /* TRAPA #42 */
+        .long   slav_err    /* TRAPA #43 */
+        .long   slav_err    /* TRAPA #44 */
+        .long   slav_err    /* TRAPA #45 */
+        .long   slav_err    /* TRAPA #46 */
+        .long   slav_err    /* TRAPA #47 */
+        .long   slav_err    /* TRAPA #48 */
+        .long   slav_err    /* TRAPA #49 */
+        .long   slav_err    /* TRAPA #50 */
+        .long   slav_err    /* TRAPA #51 */
+        .long   slav_err    /* TRAPA #52 */
+        .long   slav_err    /* TRAPA #53 */
+        .long   slav_err    /* TRAPA #54 */
+        .long   slav_err    /* TRAPA #55 */
+        .long   slav_err    /* TRAPA #56 */
+        .long   slav_err    /* TRAPA #57 */
+        .long   slav_err    /* TRAPA #58 */
+        .long   slav_err    /* TRAPA #59 */
+        .long   slav_err    /* TRAPA #60 */
+        .long   slav_err    /* TRAPA #61 */
+        .long   slav_err    /* TRAPA #62 */
+        .long   slav_err    /* TRAPA #63 */
+        .long   slav_irq    /* Level 1 IRQ */
+        .long   slav_irq    /* Level 2 & 3 IRQ's */
+        .long   slav_irq    /* Level 4 & 5 IRQ's */
+        .long   slav_irq    /* PWM interupt */
+        .long   slav_irq    /* Command interupt */
+        .long   slav_irq    /* H Blank interupt */
+        .long   slav_irq    /* V Blank interupt */
+        .long   slav_irq    /* Reset Button */
+
+! Stacks set up by BIOS
+
+! The main SH2 starts here at 0x06000244
+
+mstart:
+        bra     mcont
+        mov     #0, r4
+
+! The slave SH2 starts here at 0x06000248
+
+sstart:
+        sleep
+! broken
+        bra     xstart
+        mov     #1, r4
+
+mcont:
+
+xstart:
+        mov.l   l_cctl, r0
+        mov     #0x11, r1
+        mov.b   r1, @r0
+        mov.l   l_main_c, r0
+        jmp     @r0
+        nop
+
+.align 2
+l_cctl:
+        .long   0xFFFFFE92
+l_main_c:
+        .long   _main_c
+
+! dummy
+.global _start
+_start:
+
+.global _spin
+_spin:
+        dt      r4
+        bf      _spin
+        rts
+        nop
+
+main_err:
+main_irq:
+slav_err:
+slav_irq:
+0:
+        bra     0b
+        nop
+
+! vim:ts=8:sw=8:expandtab

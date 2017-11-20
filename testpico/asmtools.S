@@ -186,7 +186,7 @@ test_vcnt_vb:
     move.l      d4, (a2)+   /* *ram++ = count */
 
     movem.l     (sp)+, d2-d7/a2
-	rts
+    rts
 
 .global test_hint
 test_hint:
@@ -217,6 +217,21 @@ test_vint:
     rte                           /* 20 114 */
 .global test_vint_end
 test_vint_end:
+
+.global x32x_enable
+x32x_enable:
+    movea.l     #0xa15100, a0
+    movea.l     #0xa15120, a1
+    move.w      #3, (a0)          /* ADEN, nRES */
+0:
+    nop
+    nop
+    tst.w       (a1)
+    beq         0b                /* BIOS busy */
+    or.w        #1, 6(a0)         /* RV */
+    rts
+.global x32x_enable_end
+x32x_enable_end:
 
 # some nastyness from Fatal Rewind
 .global test_h_v_2
@@ -285,7 +300,7 @@ test_f:
     test_lb_s   d4, a0
     test_lb_s   d5, a0
     movem.l     (sp)+, d2-d7/a2
-	rts
+    rts
 
 .global test_hb
 test_hb:
@@ -320,6 +335,6 @@ test_hb:
     test_lb_s   d6, a1
     test_lb_s   d7, a1
     movem.l     (sp)+, d2-d7
-	rts
+    rts
 
 # vim:filetype=asmM68k:ts=4:sw=4:expandtab
