@@ -221,13 +221,24 @@ test_vint_end:
 .global x32x_enable
 x32x_enable:
     movea.l     #0xa15100, a0
-    movea.l     #0xa15120, a1
+    movea.l     #0xa15122, a1
+    move.w      #1, (a0)          /* ADEN */
+# wait for min(20_sh2_cycles, pll_setup_time)
+# pll time is unclear, icd_mars.prg mentions 10ms which sounds
+# way too much. Hope 40 68k cycles is enough
+    move.w      #40/10, d0
+0:
+    dbra        d0, 0b
     move.w      #3, (a0)          /* ADEN, nRES */
 0:
-    nop
-    nop
+    move.w      #0xffff, d0       /* waste some cycles */
     tst.w       (a1)
-    beq         0b                /* BIOS busy */
+    beq         0b                /* master BIOS busy */
+
+0:                                /* for slave, use a limit, as it */
+    tst.w       4(a1)             /* won't respond on master error. */
+    dbne        d0, 0b            /* slave BIOS busy */
+
     or.w        #1, 6(a0)         /* RV */
     rts
 .global x32x_enable_end

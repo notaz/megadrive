@@ -1,2 +1,5 @@
 *.o
 *.gen
+*.swp
+tags
+cscope.out

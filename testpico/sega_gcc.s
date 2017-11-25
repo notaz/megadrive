@@ -1,5 +1,5 @@
 exc_tab:
-    dc.l     0, 0x200, exc02, exc03, exc04, exc05, exc06, exc07
+    dc.l     0,   RST, exc02, exc03, exc04, exc05, exc06, exc07
     dc.l exc08, exc09, exc0a, exc0b, exc0c, exc0d, exc0e, exc0f
     dc.l exc10, exc11, exc12, exc13, exc14, exc15, exc16, exc17
     dc.l exc18, exc19, exc1a, exc1b, 0xff0100, exc1d, 0xff0140, exc1f
@@ -23,84 +23,11 @@ exc_tab:
     .ascii "                        "
     .ascii "JUE             "                        /* 1f0 */
 
-RST:
-    move.w  #0x2700, %sr
-
-    move.b (0xA10001), %d0
-    andi.b #0x0F, %d0
-    beq.s 0f
-    move.l  #0x53454741, (0xA14000) /* 'SEGA' */
-0:
-	tst.w   (0xc00004).l
-
-    moveq   #0, %d0
-    movea.l %d0, %a7
-    move    %a7, %usp
-
-    /* clear .bss */
-    lea     __bss_start, %a0
-    lea     __end, %a1
-0:
-    move.l  %d0, (%a0)+
-    cmp.l   %a1, %a0
-    blt.s   0b
-
-#    move.w  #0x2000, %sr
-    jsr     main
-0:
-    bra     0b
-
-#HBL:
-#VBL:
-#    rte
-
-pre_exception:
-    move.w  #0x2700, %sr
-    movem.l %d0-%d7/%a0-%a7,-(%sp)
-    move.l %sp, %d0
-    move.l %d0,-(%sp)
-    jsr exception
-0:
-    bra 0b
-
-.macro exc_stub num
-exc\num:
-    move.w #0x\num, -(%sp)
-    jmp pre_exception
-.endm
-
-exc_stub 02
-exc_stub 03
-exc_stub 04
-exc_stub 05
-exc_stub 06
-exc_stub 07
-exc_stub 08
-exc_stub 09
-exc_stub 0a
-exc_stub 0b
-exc_stub 0c
-exc_stub 0d
-exc_stub 0e
-exc_stub 0f
-exc_stub 10
-exc_stub 11
-exc_stub 12
-exc_stub 13
-exc_stub 14
-exc_stub 15
-exc_stub 16
-exc_stub 17
-exc_stub 18
-exc_stub 19
-exc_stub 1a
-exc_stub 1b
-HBL:
-exc_stub 1c
-exc_stub 1d
-VBL:
-exc_stub 1e
-exc_stub 1f
+# mystery landing area for reset with 32X on and RV=1
+# 2c8 - 304 in multiples of 4
+.rept 0x1c0/2
+    illegal
+.endr
 
     /* MARS data */
     .org 0x3c0
@@ -109,10 +36,10 @@ exc_stub 1f
     .long sh2_test   /* ROM src */
     .long 0          /* SDRAM dst */
     .long sh2_test_end-sh2_test /* length */
-    .long 0x06000244 /* master entry */
-    .long 0x06000248 /* slave entry */
+    .long 0x06000400 /* master entry */
+    .long 0x06000404 /* slave entry */
     .long 0x06000000 /* master VBR */
-    .long 0x06000124 /* slave VBR */
+    .long 0x06000200 /* slave VBR */
     /* Standard 32X startup code for MD side at 0x3F0 */
     .org 0x3f0
     .word 0x287C,0xFFFF,0xFFC0,0x23FC,0x0000,0x0000,0x00A1,0x5128
@@ -181,6 +108,87 @@ exc_stub 1f
     .word 0xFFC0,0x4CD6,0x7FF9,0x44FC,0x0000,0x6014,0x43F9,0x00A1
     .word 0x5100,0x3340,0x0006,0x303C,0x8000,0x6004,0x44FC,0x0001
 
+RST:
+    move.w  #0x2600, %sr
+
+    move.b (0xA10001), %d0
+    andi.b #0x0F, %d0
+    beq.s 0f
+    move.l  #0x53454741, (0xA14000) /* 'SEGA' */
+0:
+    tst.w   (0xc00004).l
+
+    moveq   #0, %d0
+    movea.l %d0, %a7
+    move    %a7, %usp
+
+    /* clear .bss */
+    lea     __bss_start, %a0
+    lea     __end, %a1
+0:
+    move.l  %d0, (%a0)+
+    cmp.l   %a1, %a0
+    blt.s   0b
+
+#    move.w  #0x2000, %sr
+    jsr     main
+0:
+    bra     0b
+
+#HBL:
+#VBL:
+#    rte
+
+pre_exception:
+    move.w  #0x2700, %sr
+    movem.l %d0-%d7/%a0-%a7,-(%sp)
+    add.w   #2, 0x3e(%sp)
+    move.l  %sp, %d0
+    move.l  %d0,-(%sp)
+    jsr     exception
+0:
+    bra     0b
+
+.macro exc_stub num
+exc\num:
+    move.w #0x\num, -(%sp)
+    jmp pre_exception
+.endm
+
+exc_stub 02
+exc_stub 03
+exc_stub 04
+exc_stub 05
+exc_stub 06
+exc_stub 07
+exc_stub 08
+exc_stub 09
+exc_stub 0a
+exc_stub 0b
+exc_stub 0c
+exc_stub 0d
+exc_stub 0e
+exc_stub 0f
+
+exc_stub 10
+exc_stub 11
+exc_stub 12
+exc_stub 13
+exc_stub 14
+exc_stub 15
+exc_stub 16
+exc_stub 17
+exc_stub 18
+exc_stub 19
+exc_stub 1a
+exc_stub 1b
+HBL:
+exc_stub 1c
+exc_stub 1d
+VBL:
+exc_stub 1e
+exc_stub 1f
+
 exc_stub 20
 exc_stub 21
 exc_stub 22
@@ -214,13 +222,32 @@ exc_stub 3d
 exc_stub 3e
 exc_stub 3f
 
-.section .rodata
-.align 2
+.align 4
+
+# must avoid anything use 1070, 2070, 3070 after RV is set,
+# so let's place some data here
+.global z80_test
+.global z80_test_end
+z80_test:
+.incbin "z80_test.bin80"
+z80_test_end:
+
+.align 4
 
 .global sh2_test
 .global sh2_test_end
 sh2_test:
 .incbin "sh2_test.binsh"
 sh2_test_end:
+
+.org 0x2070
+.long 0x1234567f
+
+.global font_base
+font_base:
+.incbin "font.bin"
+
+.org 0x3070
+.long 0x3456789f
 
 # vim:filetype=asmM68k:ts=4:sw=4:expandtab

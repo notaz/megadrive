@@ -1510,8 +1510,15 @@ static int t_32x_init(void)
     u32 S_OK = MKLONG('S','_','O','K');
     u32 *r = (u32 *)0xa15100;
     u16 *r16 = (u16 *)r;
-    int ok = 1;
+    int i, ok = 1;
 
+    //v1070 = read32(0x1070);
+
+    /* what does REN mean exactly?
+     * Seems to be sometimes clear after reset */
+    for (i = 0; i < 1000000; i++)
+        if (read16(r16) & 0x80)
+            break;
     expect(ok, r16[0x00/2], 0x82);
     expect(ok, r16[0x02/2], 0);
     expect(ok, r16[0x04/2], 0);
@@ -1521,6 +1528,8 @@ static int t_32x_init(void)
     expect(ok, r[0x1c/4], 0);
     write32(&r[0x20/4], 0); // master resp
     write32(&r[0x24/4], 0); // slave resp
+    write32(&r[0x28/4], 0);
+    write32(&r[0x2c/4], 0);
 
     // could just set RV, but BIOS reads ROM, so can't
     memcpy_(do_32x_enable, x32x_enable,
@@ -1545,12 +1554,15 @@ static void x32_cmd(enum x32x_cmd cmd, u16 is_slave)
 {
     u16 v, *r = (u16 *)0xa15120;
     u16 cmd_s = cmd | (is_slave << 15);
+    int i;
     write16(r, cmd_s);
     mem_barrier();
-    while ((v = read16(r)) == cmd_s)
+    for (i = 0; i < 10000 && (v = read16(r)) == cmd_s; i++)
         burn10(1);
-    if (v != 0)
+    if (v != 0) {
         printf("cmd clr: %x\n", v);
+        write16(r, 0);
+    }
 }
 
 static int t_32x_echo(void)
@@ -1562,9 +1574,11 @@ static int t_32x_echo(void)
     x32_cmd(CMD_ECHO, 0);
     expect(ok, r[0x04/2], 0x1234);
     write16(&r[0x02/2], 0x2345);
-    // mysteriously broken (random hangs)
-    //x32_cmd(CMD_ECHO, 1);
-    //expect(ok, r[0x04/2], 0x8345);
+    write16(&r[0x04/2], 0);
+    x32_cmd(CMD_ECHO, 1);
+    expect(ok, r[0x04/2], 0xa345);
+    expect(ok, r[0x0c/2], 0);
+    expect(ok, r[0x0e/2], 0);
     return ok;
 }
 
@@ -1576,12 +1590,14 @@ static int t_32x_md_rom(void)
     expect(ok, rl[0x004/4], 0x880200);
     expect(ok, rl[0x100/4], 0x53454741);
     expect(ok, rl[0x70/4], 0);
-    write32(&rl[0x70/4], ~0);
+    write32(&rl[0x70/4], 0xa5123456);
     write32(&rl[0x78/4], ~0);
     mem_barrier();
-    expect(ok, rl[0x70/4], ~0);
     expect(ok, rl[0x78/4], 0x8802ae);
-    // not tested: with RV 0x880000/0x900000 hangs
+    expect(ok, rl[0x70/4], 0xa5123456);
+    //expect(ok, rl[0x1070/4], v1070);
+    write32(&rl[0x70/4], 0);
+    // with RV 0x880000/0x900000 hangs, can't test
     return ok;
 }
 
@@ -1595,7 +1611,6 @@ static const struct {
     int (*test)(void);
     const char *name;
 } g_tests[] = {
-#if 0
     { T_MD, t_dma_zero_wrap,       "dma zero len + wrap" },
     { T_MD, t_dma_zero_fill,       "dma zero len + fill" },
     { T_MD, t_dma_ram_wrap,        "dma ram wrap" },
@@ -1636,7 +1651,6 @@ static const struct {
     { T_MD, t_irq_ack_h_v,         "irq ack h-v" },
     { T_MD, t_irq_ack_h_v_2,       "irq ack h-v 2" },
     { T_MD, t_irq_f_flag_h40,      "irq f flag h40" },
-#endif
     { T_MD, t_irq_f_flag_h32,      "irq f flag h32" },
 
     // the first one enables 32X, so should be kept

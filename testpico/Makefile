@@ -17,7 +17,7 @@ CFLAGS += -Wall -g -O2 -m68000 -fomit-frame-pointer
 LDLIBS += $(shell $(CC) -print-file-name=libgcc.a)
 
 TARGET = testpico
-OBJS = sega_gcc.o main.o asmtools.o data.o
+OBJS = sega_gcc.o main.o asmtools.o
 
 all: $(TARGET).bin
 
@@ -60,7 +60,7 @@ $(TARGET_SH).elf: $(OBJS_SH)
 	$(CC_SH) -o $@ -c $< $(CFLAGS_SH)
 
 # manual deps
-data.o: z80_test.bin80
+sega_gcc.o: z80_test.bin80
 sega_gcc.o: sh2_test.binsh
 
 up: $(TARGET).bin
