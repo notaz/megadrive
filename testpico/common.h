@@ -29,6 +29,12 @@
 enum x32x_cmd {
     CMD_ECHO = 1,
     CMD_READ_FRT = 2, // read Free-Running Timer
+    CMD_READ8 = 3,
+    CMD_READ16 = 4,
+    CMD_READ32 = 5,
+    CMD_WRITE8 = 6,
+    CMD_WRITE16 = 7,
+    CMD_WRITE32 = 8,
 };
 
 // vim:ts=4:sw=4:expandtab

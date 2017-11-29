@@ -1547,21 +1547,33 @@ static int t_32x_init(void)
     while (!read16(&r16[0x24/2]))
         ;
     expect(ok, r[0x24/4], S_OK);
+    write32(&r[0x20/4], 0);
     return ok;
 }
 
-static void x32_cmd(enum x32x_cmd cmd, u16 is_slave)
+static void x32_cmd(enum x32x_cmd cmd, u32 a0, u32 a1, u16 is_slave)
 {
     u16 v, *r = (u16 *)0xa15120;
     u16 cmd_s = cmd | (is_slave << 15);
     int i;
+
+    write32(&r[4/2], a0);
+    write32(&r[8/2], a1);
+    mem_barrier();
     write16(r, cmd_s);
     mem_barrier();
     for (i = 0; i < 10000 && (v = read16(r)) == cmd_s; i++)
         burn10(1);
     if (v != 0) {
         printf("cmd clr: %x\n", v);
+        mem_barrier();
+        printf("c, e: %02x %02x\n", r[0x0c/2],  r[0x0e/2]);
         write16(r, 0);
+    }
+    v = read16(&r[1]);
+    if (v != 0) {
+        printf("cmd err: %x\n", v);
+        write16(&r[1], 0);
     }
 }
 
@@ -1570,15 +1582,27 @@ static int t_32x_echo(void)
     u16 *r = (u16 *)0xa15120;
     int ok = 1;
 
-    write16(&r[0x02/2], 0x1234);
-    x32_cmd(CMD_ECHO, 0);
-    expect(ok, r[0x04/2], 0x1234);
-    write16(&r[0x02/2], 0x2345);
-    write16(&r[0x04/2], 0);
-    x32_cmd(CMD_ECHO, 1);
-    expect(ok, r[0x04/2], 0xa345);
-    expect(ok, r[0x0c/2], 0);
-    expect(ok, r[0x0e/2], 0);
+    x32_cmd(CMD_ECHO, 0x12340000, 0, 0);
+    expect(ok, r[0x06/2], 0x1234);
+    x32_cmd(CMD_ECHO, 0x23450000, 0, 1);
+    expect(ok, r[0x06/2], 0xa345);
+    return ok;
+}
+
+static int t_32x_md_bios(void)
+{
+    void (*do_call_c0)(int a, int d) = (void *)0xff0040;
+    u8 *rmb = (u8 *)0xff0000;
+    u32 *rl = (u32 *)0;
+    int ok = 1;
+
+    memcpy_(do_call_c0, test_32x_b_c0,
+            test_32x_b_c0_end - test_32x_b_c0);
+    write8(rmb, 0);
+    do_call_c0(0xff0000, 0x5a);
+
+    expect(ok, rmb[0], 0x5a);
+    expect(ok, rl[0x04/4], 0x880200);
     return ok;
 }
 
@@ -1598,6 +1622,55 @@ static int t_32x_md_rom(void)
     //expect(ok, rl[0x1070/4], v1070);
     write32(&rl[0x70/4], 0);
     // with RV 0x880000/0x900000 hangs, can't test
+    return ok;
+}
+
+static int t_32x_md_fb(void)
+{
+    u8  *fbb = (u8 *)0x840000;
+    u16 *fbw = (u16 *)fbb;
+    u32 *fbl = (u32 *)fbb;
+    u8  *fob = (u8 *)0x860000;
+    u16 *fow = (u16 *)fob;
+    u32 *fol = (u32 *)fob;
+    int ok = 1;
+
+    fbl[0] = 0x12345678;
+    fol[1] = 0x89abcdef;
+    mem_barrier();
+    expect(ok, fbw[1], 0x5678);
+    expect(ok, fow[2], 0x89ab);
+    fbb[0] = 0;
+    fob[1] = 0;
+    fbw[1] = 0;
+    fow[2] = 0;
+    fow[3] = 1;
+    mem_barrier();
+    fow[3] = 0x200;
+    mem_barrier();
+    expect(ok, fol[0], 0x12340000);
+    expect(ok, fbl[1], 0x89ab0201);
+    return ok;
+}
+
+static int t_32x_sh_fb(void)
+{
+    u32 *fbl = (u32 *)0x840000;
+    int ok = 1;
+
+    fbl[0] = 0x12345678;
+    fbl[1] = 0x89abcdef;
+    mem_barrier();
+    write8(0xa15100, 0x80); // FM=1
+    x32_cmd(CMD_WRITE8,  0x24000000, 0, 0);
+    x32_cmd(CMD_WRITE8,  0x24020001, 0, 0);
+    x32_cmd(CMD_WRITE16, 0x24000002, 0, 0);
+    x32_cmd(CMD_WRITE16, 0x24020000, 0, 0);
+    x32_cmd(CMD_WRITE32, 0x24020004, 0x5a0000a5, 1);
+    write8(0xa15100, 0x00); // FM=0
+    mem_barrier();
+    expect(ok, fbl[0], 0x12340000);
+    expect(ok, fbl[1], 0x5aabcda5);
     return ok;
 }
 
@@ -1653,10 +1726,14 @@ static const struct {
     { T_MD, t_irq_f_flag_h40,      "irq f flag h40" },
     { T_MD, t_irq_f_flag_h32,      "irq f flag h32" },
 
-    // the first one enables 32X, so should be kept
+    // the first one enables 32X, so must be kept
+    // all tests assume RV=1 FM=0
     { T_32, t_32x_init,            "32x init" },
     { T_32, t_32x_echo,            "32x echo" },
-    { T_32, t_32x_md_rom,          "32x rom" },
+    { T_32, t_32x_md_bios,         "32x md bios" },
+    { T_32, t_32x_md_rom,          "32x md rom" },
+    { T_32, t_32x_md_fb,           "32x md fb" },
+    { T_32, t_32x_sh_fb,           "32x sh fb" },
 };
 
 static void setup_z80(void)

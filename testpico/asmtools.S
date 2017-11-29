@@ -244,6 +244,16 @@ x32x_enable:
 .global x32x_enable_end
 x32x_enable_end:
 
+.global test_32x_b_c0
+test_32x_b_c0:
+    ldarg       0, 0, a1
+    ldargw      1, 0, d0
+    jsr         (0xc0).l          /* move.b d0, (a1); RV=0 */
+    bset        #0, (0xa15107).l
+    rts
+.global test_32x_b_c0_end
+test_32x_b_c0_end:
+
 # some nastyness from Fatal Rewind
 .global test_h_v_2
 test_h_v_2:
