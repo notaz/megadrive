@@ -1268,17 +1268,23 @@ static int t_tim_vdp_as_cram_w(void)
     return ok;
 }
 
+struct irq_test {
+    u16 cnt;
+    union {
+        u16 hv;
+        u8 v;
+    } first, last;
+};
+
 static int t_irq_hint(void)
 {
-    u16 *ram = (u16 *)0xfff000;
-    u8 *ram8 = (u8 *)0xfff000;
-    u16 v_p, cnt_p;
+    struct irq_test *it = (void *)0xfff000;
     int ok = 1;
 
     // for more fun, disable the display
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD);
 
-    ram[0] = ram[1] = ram[2] = 0;
+    it->cnt = it->first.hv = it->last.hv = 0;
     memcpy_((void *)0xff0100, test_hint, test_hint_end - test_hint);
     VDP_setReg(10, 0);
     while (read8(VDP_HV_COUNTER) != 100)
@@ -1290,24 +1296,39 @@ static int t_irq_hint(void)
     move_sr(0x2000);
     burn10(488 * 2 / 10);
     move_sr(0x2700);
-    v_p = ram8[2];
-    cnt_p = ram[0];
-    ram[0] = ram[1] = ram[2] = 0;
+    expect(ok, it->first.v, 229);      // pending irq trigger
+    expect(ok, it->cnt, 1);
+
     // count irqs
+    it->cnt = it->first.hv = it->last.hv = 0;
     move_sr(0x2000);
     while (read8(VDP_HV_COUNTER) != 4)
         ;
     while (read8(VDP_HV_COUNTER) != 228)
         ;
     move_sr(0x2700);
-    VDP_setReg(VDP_MODE1, VDP_MODE1_PS);
+    expect(ok, it->cnt, 225);
+    expect(ok, it->first.v, 0);
+    expect(ok, it->last.v, 224);
+
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
 
-    expect(ok, v_p, 229);      // pending irq trigger
-    expect(ok, cnt_p, 1);
-    expect(ok, ram[0], 225);   // count
-    expect(ok, ram8[2], 0);    // first line
-    expect(ok, ram8[4], 224);  // last line
+    // detect reload line
+    it->cnt = it->first.hv = it->last.hv = 0;
+    VDP_setReg(10, 17);
+    move_sr(0x2000);
+    while (read16(VDP_CTRL_PORT) & 8)
+        /* blanking */;
+    VDP_setReg(10, 255);
+    while (read8(VDP_HV_COUNTER) != 228)
+        ;
+    move_sr(0x2700);
+    expect(ok, it->cnt, 1);
+    expect(ok, it->first.v, 17);
+    expect(ok, it->last.v, 17);
+
+    VDP_setReg(VDP_MODE1, VDP_MODE1_PS);
+
     return ok;
 }
 
@@ -1323,6 +1344,11 @@ static int t_irq_ack_v_h(void)
     memcpy_((void *)0xff0100, test_hint, test_hint_end - test_hint);
     memcpy_((void *)0xff0140, test_vint, test_vint_end - test_vint);
     VDP_setReg(10, 0);
+    /* ensure hcnt reload */
+    while (!(read16(VDP_CTRL_PORT) & 8))
+        /* not blanking */;
+    while (read16(VDP_CTRL_PORT) & 8)
+        /* blanking */;
     VDP_setReg(VDP_MODE1, VDP_MODE1_PS | VDP_MODE1_IE1);
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_IE0);
     while (read8(VDP_HV_COUNTER) != 100)
