@@ -439,6 +439,11 @@ int main()
     VDP_setReg(VDP_SCROLLSZ, 0x01); 
     VDP_setReg(VDP_BACKDROP, 0); 
 
+    /* pattern 0 */
+    write32(GFX_CTRL_PORT, GFX_WRITE_VRAM_ADDR(0));
+    for (i = 0; i < 32 / 4; i++)
+        write32(GFX_DATA_PORT, 0);
+
     /* clear name tables */
     write32(GFX_CTRL_PORT, GFX_WRITE_VRAM_ADDR(APLANE));
     for (i = 0; i < PLANE_W * PLANE_H / 2; i++)
