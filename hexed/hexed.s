@@ -31,7 +31,9 @@
 
 .equ USE_VINT,        0
 .equ COPY_TO_EXP,     1
-.equ RELOCATE_TO_RAM, 1
+.equ RELOCATE_TO_RAM, 0xff0100 /* addr or 0 to disable */
+.equ COPY_TEST_CODE,  0        /* addr or 0 to disable, copy only */
+.equ PC_TRANSFER,     0
 
 .text
 .globl main
@@ -280,6 +282,7 @@ main:
 	tst.w		(0xc00004).l
 no_tmss:
 
+.if PC_TRANSFER
 	/* want to do early PC transfer (with RAM/VRAM intact and such)?
 	 * also give time PC to see start condition */
 	move.l		#0x2000,d0
@@ -288,7 +291,6 @@ no_tmss:
 	move.l		#0xa10005,a0
 	btst.b		#5,(a0)
 	bne		no_early_transfer
-move.b #1,(0)
 	move.b		#0x40,(0xa1000b).l	/* port 2 ctrl */
 	move.b		#0x00,(a0)		/* port 2 data - start with TH low */
 	move.l		#0x2000,d0
@@ -297,15 +299,14 @@ move.b #1,(0)
 	beq		do_early_transfer
 	dbra		d0,0b
 
-move.b #2,(0)
 	move.b		#0,(0xa1000b).l
 	bra		no_early_transfer	/* timeout */
 
 do_early_transfer:
-move.b #9,(0)
 	bsr		do_transfer
 
 no_early_transfer:
+.endif
 
 .if COPY_TO_EXP
 	/* copy to expansion device if magic number is set */
@@ -331,34 +332,38 @@ no_early_transfer:
 	move.l		d0,a0
 
 	/* copy, assume 8K size */
-	move.l		#0xFF0100,a1
+	move.l		#RELOCATE_TO_RAM,a2
 	move.l		(sizeof_bin,pc),d0
+	move.l		a2, a1
 	lsr.l		#3,d0
 1:
 	move.l		(a0)+,(a1)+
 	move.l		(a0)+,(a1)+
 	dbra		d0,1b
 
+	lea		(0f,pc),a0
+	move.l		a0,d0
+	and.l		#0x00ffff,d0
+	add.l		d0,a2
+.endif
+
+.if COPY_TEST_CODE
 	/* copy test code */
 	lea             (test_code,pc),a0
-	move.l		#0xffc000,a1
+	move.l		#COPY_TEST_CODE,a1
 	move.w		#(test_code_end - test_code)/2-1,d0
 1:
 	move.w		(a0)+,(a1)+
 	dbra		d0,1b
 
-	lea		(0f,pc),a0
-	move.l		a0,d0
-	and.l		#0x00ffff,d0
-	add.l		#0xFF0100,d0
-	move.l		d0,a0
-
 	/* patch test code */
-	move.l		#0xffc000,a1
+	move.l		#COPY_TEST_CODE,a1
 	add.w		#(test_code_ret_op-test_code+2),a1
-	move.l		a0,(a1)
+	move.l		a2,(a1)
+.endif
 
-	jmp		(a0)
+.if RELOCATE_TO_RAM
+	jmp		(a2)
 0:
 .endif
 
@@ -1344,6 +1349,7 @@ mode_jmp_finish:
 	jmp		(a0)
 
 mode_transfer:
+.if PC_TRANSFER
 	move.b		#0x40,(0xa1000b).l	/* port 2 ctrl */
 	move.b		#0x00,(0xa10005).l	/* port 2 data - start with TH low */
 
@@ -1360,6 +1366,7 @@ wait_tl_low0:
 
 	menu_text	txt_working, 13, 13, 0
 	bsr		do_transfer
+.endif
 	bra		return_to_main
 
 # go back to main mode
@@ -1638,12 +1645,14 @@ wait_vsync_poll:
 	rts
 
 
+.if COPY_TEST_CODE
 test_code:
 	nop
 
 test_code_ret_op:
 	jmp	0x123456        /* will be patched */
 test_code_end:
+.endif
 
 #################################################
 #                                               #

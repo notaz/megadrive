@@ -95,6 +95,7 @@ SECTIONS
   {
     *(.shdata)
     *(.data)
+    . = ALIGN(0x10);
     _edata = .;
   } > ram
 
