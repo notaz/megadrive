@@ -1274,6 +1274,7 @@ struct irq_test {
         u16 hv;
         u8 v;
     } first, last;
+    u16 pad;
 };
 
 static int t_irq_hint(void)
@@ -1332,15 +1333,50 @@ static int t_irq_hint(void)
     return ok;
 }
 
+static int t_irq_both_cpu_unmask(void)
+{
+    struct irq_test *ith = (void *)0xfff000;
+    struct irq_test *itv = ith + 1;
+    u16 s0, s1;
+    int ok = 1;
+
+    memset_(ith, 0, sizeof(*ith) * 2);
+    memcpy_((void *)0xff0100, test_hint, test_hint_end - test_hint);
+    memcpy_((void *)0xff0140, test_vint, test_vint_end - test_vint);
+    VDP_setReg(10, 0);
+    while (read8(VDP_HV_COUNTER) != 100)
+        ;
+    while (read8(VDP_HV_COUNTER) != 226)
+        ;
+    VDP_setReg(10, 99);
+    VDP_setReg(VDP_MODE1, VDP_MODE1_PS | VDP_MODE1_IE1);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_IE0 | VDP_MODE2_DISP);
+    /* go to active display line 100 */
+    while (read8(VDP_HV_COUNTER) != 100)
+        ;
+    s0 = read16(VDP_CTRL_PORT);
+    s1 = move_sr_and_read(0x2000, VDP_CTRL_PORT);
+    move_sr(0x2700);
+    VDP_setReg(VDP_MODE1, VDP_MODE1_PS);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
+
+    expect(ok, itv->cnt, 1);       // vint count
+    expect(ok, itv->first.v, 100); // vint line
+    expect(ok, ith->cnt, 1);       // hint count
+    expect(ok, ith->first.v, 100); // hint line
+    expect_bits(ok, s0, SR_F, SR_F);
+    expect_bits(ok, s1, 0, SR_F);
+    return ok;
+}
+
 static int t_irq_ack_v_h(void)
 {
-    u16 *ram = (u16 *)0xfff000;
-    u8 *ram8 = (u8 *)0xfff000;
+    struct irq_test *ith = (void *)0xfff000;
+    struct irq_test *itv = ith + 1;
     u16 s0, s1, s2;
     int ok = 1;
 
-    ram[0] = ram[1] = ram[2] =
-    ram[4] = ram[5] = ram[6] = 0;
+    memset_(ith, 0, sizeof(*ith) * 2);
     memcpy_((void *)0xff0100, test_hint, test_hint_end - test_hint);
     memcpy_((void *)0xff0140, test_vint, test_vint_end - test_vint);
     VDP_setReg(10, 0);
@@ -1364,10 +1400,10 @@ static int t_irq_ack_v_h(void)
     VDP_setReg(VDP_MODE1, VDP_MODE1_PS);
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
 
-    expect(ok, ram[4], 1);     // vint count
-    expect(ok, ram8[10], 226); // vint line
-    expect(ok, ram[0], 1);     // hint count
-    expect(ok, ram8[2], 228);  // hint line
+    expect(ok, itv->cnt, 1);       // vint count
+    expect(ok, itv->first.v, 226); // vint line
+    expect(ok, ith->cnt, 1);       // hint count
+    expect(ok, ith->first.v, 228); // hint line
     expect_bits(ok, s0, SR_F, SR_F);
     expect_bits(ok, s1, 0, SR_F);
     expect_bits(ok, s2, 0, SR_F);
@@ -1376,13 +1412,12 @@ static int t_irq_ack_v_h(void)
 
 static int t_irq_ack_v_h_2(void)
 {
-    u16 *ram = (u16 *)0xfff000;
-    u8 *ram8 = (u8 *)0xfff000;
+    struct irq_test *ith = (void *)0xfff000;
+    struct irq_test *itv = ith + 1;
     u16 s0, s1;
     int ok = 1;
 
-    ram[0] = ram[1] = ram[2] =
-    ram[4] = ram[5] = ram[6] = 0;
+    memset_(ith, 0, sizeof(*ith) * 2);
     memcpy_((void *)0xff0100, test_hint, test_hint_end - test_hint);
     memcpy_((void *)0xff0140, test_vint, test_vint_end - test_vint);
     VDP_setReg(10, 0);
@@ -1396,10 +1431,10 @@ static int t_irq_ack_v_h_2(void)
     VDP_setReg(VDP_MODE1, VDP_MODE1_PS);
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
 
-    expect(ok, ram[4], 2);     // vint count
-    expect(ok, ram8[10], 226); // vint line
-    expect(ok, ram[0], 1);     // hint count
-    expect(ok, ram8[2], 227);  // hint line
+    expect(ok, itv->cnt, 2);       // vint count
+    expect(ok, itv->first.v, 226); // vint line
+    expect(ok, ith->cnt, 1);       // hint count
+    expect(ok, ith->first.v, 227); // hint line
     expect_bits(ok, s0, SR_F, SR_F);
     expect_bits(ok, s1, 0, SR_F);
     return ok;
@@ -1745,6 +1780,7 @@ static const struct {
     { T_MD, t_tim_vdp_as_vram_w,   "time vdp vram w" },
     { T_MD, t_tim_vdp_as_cram_w,   "time vdp cram w" },
     { T_MD, t_irq_hint,            "irq4 / line" },
+    { T_MD, t_irq_both_cpu_unmask, "irq both umask" },
     { T_MD, t_irq_ack_v_h,         "irq ack v-h" },
     { T_MD, t_irq_ack_v_h_2,       "irq ack v-h 2" },
     { T_MD, t_irq_ack_h_v,         "irq ack h-v" },

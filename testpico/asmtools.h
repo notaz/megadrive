@@ -15,6 +15,7 @@ int   get_input(void);
 void  write_and_read1(unsigned int a, unsigned short d, void *dst);
 void  move_sr(unsigned short sr);
 short move_sr_and_read(unsigned short sr, unsigned int a);
+short read_sr(void);
 void  memcpy_(void *dst, const void *src, unsigned short size);
 void  memset_(void *dst, int d, unsigned short size);
 

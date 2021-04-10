@@ -99,6 +99,11 @@ move_sr_and_read:
     move.w      (a0), d0
     rts
 
+.global read_sr
+read_sr:
+    move.w      sr, d0
+    rts
+
 .global memcpy_ /* void *dst, const void *src, u16 size */
 memcpy_:
     ldarg       0, 0, a0
@@ -199,7 +204,7 @@ test_hint:
 0:
     move.w      d0, (0xf004).w    /* 12 */
     move.w      (sp)+, d0         /*  8 */
-    rte                           /* 20 114 */
+    rte                           /* 20 114+44 */
 .global test_hint_end
 test_hint_end:
 
