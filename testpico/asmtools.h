@@ -33,5 +33,7 @@ extern const char test_f_vint[];
 extern const char test_f_vint_end[];
 extern const char x32x_enable[];
 extern const char x32x_enable_end[];
+extern const char x32x_disable[];
+extern const char x32x_disable_end[];
 extern const char test_32x_b_c0[];
 extern const char test_32x_b_c0_end[];

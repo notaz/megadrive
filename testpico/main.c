@@ -312,6 +312,7 @@ struct exc_frame {
 
 void exception(const struct exc_frame *f)
 {
+    u32 *sp, sp_add;
     int i;
 
     while (read16(VDP_CTRL_PORT) & 2)
@@ -332,16 +333,21 @@ void exception(const struct exc_frame *f)
     printf("    \n");
 
     if (f->ecxnum < 4) {
-        printf("  PC: %08x SR: %04x    \n", f->bae.pc, f->bae.sr);
+        printf("  PC: %08x SR: %04x            \n", f->bae.pc, f->bae.sr);
         printf("addr: %08x IR: %04x FC: %02x   \n",
                f->bae.addr, f->bae.ir, f->bae.fc);
+        sp_add = 14;
     }
     else {
-        printf("  PC: %08x SR: %04x    \n", f->g.pc, f->g.sr);
+        printf("  PC: %08x SR: %04x            \n", f->g.pc, f->g.sr);
+        sp_add = 6;
     }
     for (i = 0; i < 8; i++)
         printf("  D%d: %08x A%d: %08x    \n", i, f->dr[i], i, f->ar[i]);
-    printf("                       \n");
+    printf("                               \n");
+    sp = (u32 *)(f->ar[7] + sp_add);
+    printf(" %08x %08x %08x %08x\n", sp[0], sp[1], sp[2], sp[3]);
+    printf(" %08x %08x %08x %08x\n", sp[4], sp[5], sp[6], sp[7]);
 }
 
 // ---
@@ -1096,11 +1102,7 @@ static int t_tim_z80_vdp(void)
     z80_read_loop(zram, 0x7f08);
 
     expect(ok, zram[0x1000], 0);
-#ifndef PICO
     expect_range(ok, zram[0x1100], 0x91, 0x91);
-#else
-    expect_range(ok, zram[0x1100], 0x8e, 0x91);
-#endif
     return ok;
 }
 
@@ -1115,11 +1117,7 @@ static int t_tim_z80_bank_rom(void)
     z80_read_loop(zram, 0x8000);
 
     expect(ok, zram[0x1000], 0);
-#ifndef PICO
     expect_range(ok, zram[0x1100], 0x95, 0x96);
-#else
-    expect_range(ok, zram[0x1100], 0x93, 0x96);
-#endif
     return ok;
 }
 
@@ -1219,9 +1217,7 @@ static int t_tim_hblank_h32(void)
     test_hb();
     VDP_setReg(VDP_MODE4, 0x81);
 
-#ifndef PICO
     expect_bits(ok, r[0], 0, SR_HB);
-#endif
     // set: 1-4
     expect_bits(ok, r[4], SR_HB, SR_HB);
     expect_bits(ok, r[5], SR_HB, SR_HB);
@@ -1260,11 +1256,7 @@ static int t_tim_vdp_as_cram_w(void)
 
     setup_default_palette();
 
-#ifndef PICO
     expect(ok, vcnt, 112);
-#else
-    expect_range(ok, vcnt, 111, 112);
-#endif
     return ok;
 }
 
@@ -1664,6 +1656,8 @@ static int t_32x_md_bios(void)
 
     expect(ok, rmb[0], 0x5a);
     expect(ok, rl[0x04/4], 0x880200);
+    expect(ok, rl[0x10/4], 0x880212);
+    expect(ok, rl[0x94/4], 0x8802d8);
     return ok;
 }
 
@@ -1735,6 +1729,35 @@ static int t_32x_sh_fb(void)
     return ok;
 }
 
+static int t_32x_disable(void)
+{
+    void (*do_32x_disable)(void) = (void *)0xff0040;
+    u32 *r = (u32 *)0xa15100;
+    u16 *r16 = (u16 *)r;
+    u32 *rl = (u32 *)0;
+    int ok = 1;
+
+    expect(ok, r16[0x00/2], 0x83);
+
+    memcpy_(do_32x_disable, x32x_disable,
+            x32x_disable_end - x32x_disable);
+    do_32x_disable();
+
+    expect(ok, r16[0x00/2], 0x82);
+    expect(ok, r16[0x02/2], 0);
+    expect(ok, r16[0x04/2], 0);
+    expect(ok, r16[0x06/2], 1); // RV
+    expect(ok, r[0x14/4], 0);
+    expect(ok, r[0x18/4], 0);
+    expect(ok, r[0x1c/4], 0);
+    expect(ok, rl[0x04/4], 0x000800);
+
+    write16(&r16[0x06/2], 0);   // can just set without ADEN
+    mem_barrier();
+    expect(ok, r16[0x06/2], 0); // RV
+    return ok;
+}
+
 enum {
     T_MD = 0,
     T_32 = 1, // 32X
@@ -1755,9 +1778,7 @@ static const struct {
     { T_MD, t_dma_short_cmd,       "dma short cmd" },
     { T_MD, t_dma_fill3_odd,       "dma fill3 odd" },
     { T_MD, t_dma_fill3_even,      "dma fill3 even" },
-#ifndef PICO // later
     { T_MD, t_dma_fill3_vsram,     "dma fill3 vsram" },
-#endif
     { T_MD, t_dma_fill_dis,        "dma fill disabled" },
     { T_MD, t_dma_fill_src,        "dma fill src incr" },
     { T_MD, t_dma_128k,            "dma 128k mode" },
@@ -1796,6 +1817,7 @@ static const struct {
     { T_32, t_32x_md_rom,          "32x md rom" },
     { T_32, t_32x_md_fb,           "32x md fb" },
     { T_32, t_32x_sh_fb,           "32x sh fb" },
+    { T_32, t_32x_disable,         "32x disable" }, // must be last 32x
 };
 
 static void setup_z80(void)
@@ -1855,6 +1877,7 @@ int main()
     int passed = 0;
     int skipped = 0;
     int have_32x;
+    int en_32x;
     int ret;
     u8 v8;
     int i;
@@ -1921,11 +1944,13 @@ int main()
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
 
     have_32x = read32(0xa130ec) == MKLONG('M','A','R','S');
+    en_32x = have_32x && (read32(0xa15100) & 1);
     v8 = read8(0xa10001);
-    printf("MD version: %02x %s %s %s\n", v8,
+    printf("MD version: %02x %s %s %s%s\n", v8,
         (v8 & 0x80) ? "world" : "jap",
         (v8 & 0x40) ? "pal" : "ntsc",
-        have_32x ? "32X" : "");
+        have_32x ? "32X" : "",
+        en_32x ? "+" : "");
 
     for (i = 0; i < ARRAY_SIZE(g_tests); i++) {
         // print test number if we haven't scrolled away

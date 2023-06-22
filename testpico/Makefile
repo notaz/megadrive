@@ -13,19 +13,25 @@ OBJCOPY_SH = $(CROSS_SH)objcopy
 ASFLAGS += -m68000 --register-prefix-optional --bitwise-or -pic
 ASFLAGS_CC += -Wa,-m68000 -Wa,--register-prefix-optional -Wa,--bitwise-or -Wa,-pic
 CFLAGS += -Wall -g -O2 -m68000 -fomit-frame-pointer
-#CFLAGS += -DPICO
-LDLIBS += $(shell $(CC) -print-file-name=libgcc.a)
+LDLIBS_LIBGCC := $(shell $(CC) -print-file-name=libgcc.a)
+LDLIBS += $(LDLIBS_LIBGCC)
 
-TARGET = testpico
+SUFFIX := $(shell git describe --always --dirty)
+ifdef PICO
+CFLAGS += -DPICO
+SUFFIX := $(SUFFIX)-for-pd
+endif
+TARGET_BASE = testpico
+TARGET = $(TARGET_BASE)-$(SUFFIX)
 OBJS = sega_gcc.o main.o asmtools.o
 
 all: $(TARGET).bin
 
 $(TARGET).elf: $(OBJS)
-	$(LD) -o $@ -Tsega.ld -Map $(TARGET).map $^ $(LDLIBS)
+	$(LD) -o $@ -Tsega.ld -Map $(TARGET_BASE).map $^ $(LDLIBS)
 
 clean:
-	$(RM) $(TARGET).bin $(OBJS) *.elf *.map fill
+	$(RM) $(TARGET_BASE)*.bin $(OBJS) *.elf *.map fill
 	$(RM) *.lst *.bin80 *.osh *.binsh
 
 $(TARGET).bin: $(TARGET).elf fill

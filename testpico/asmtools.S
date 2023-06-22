@@ -73,6 +73,8 @@ write_and_read1:
 #ifndef PICO
     move.w      d0, (a0)
 #else
+    /* different timing due to extra fetch of offset, */
+    /* less troulesome to emulate */
     movea.l     a0, a1
     subq.l      #1, a1
     move.w      d0, 1(a1)
@@ -249,12 +251,25 @@ x32x_enable:
 .global x32x_enable_end
 x32x_enable_end:
 
+.global x32x_disable
+x32x_disable:
+    movea.l     #0xa15100, a0
+    move.w      #1, (a0)          /* ADEN (reset sh2) */
+    move.w      #0, (a0)          /* adapter disable, reset sh2 */
+    move.w      #1, d0
+0:
+    dbra        d0, 0b
+    move.w      #2, (a0)          /* nRES - sh2s should see no ADEN and sleep */
+    rts
+.global x32x_disable_end
+x32x_disable_end:
+
 .global test_32x_b_c0
 test_32x_b_c0:
     ldarg       0, 0, a1
     ldargw      1, 0, d0
     jsr         (0xc0).l          /* move.b d0, (a1); RV=0 */
-    bset        #0, (0xa15107).l
+    bset        #0, (0xa15107).l  /* RV=1 */
     rts
 .global test_32x_b_c0_end
 test_32x_b_c0_end:

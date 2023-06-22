@@ -144,7 +144,7 @@ pre_exception:
     movem.l %d0-%d7/%a0-%a7,-(%sp)
     add.w   #2, 0x3e(%sp)
     move.l  %sp, %d0
-    move.l  %d0,-(%sp)
+    move.l  %d0,-(%sp)  /* arg0 */
     jsr     exception
 0:
     bra     0b
