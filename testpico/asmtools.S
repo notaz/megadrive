@@ -498,9 +498,16 @@ test_ym_ab_sync:
     beq         0b                    /* 10|8 */
 0:
     move.b      #0x3f, (a1)           /* 12 start a, clear  */
-    moveq.l     #3, d1                /* 12 cycles for old flag to clear itself */
-    nop
-    nop
+    move.w      #(1800/10-1), d0      /* waste cycles */
+0:
+    dbra        d0, 0b
+
+    ymwrite     a0, a1, #0x24, #0x00  /* 30 show that rewriting count */
+    ymwrite     a0, a1, #0x25, #0x00  /* 30 does nothing */
+    ymwrite     a0, a1, #0x26, #0x00  /* 30 */
+    ymwrite     a0, a1, #0x27, #0x0f  /* 30 setting already set bits too  */
+    moveq.l     #0, d0
+    moveq.l     #3, d1
 0:
     move.b      (a0), d0
     and.b       d1, d0
