@@ -1,26 +1,66 @@
+; for sjasm 0.42
   ORG $0
 
 init
-  di
-  im  $1
-  ld  sp, $2000
+  di               ;       4
+  im  $1           ;       8
+
+loop_prep
+  ld  sp, $1002    ;      10
+  ld  hl, $1000    ;      10
+  ld  b, jtable    ;       7
+  ld  d, $0        ;       7
+  xor a            ;       4  (50)
 
 loop
-  ld  a, ($1000)   ;      13
-  or  a            ;       4
-  jp  z, loop      ;      10  27 (41 worst)
+  add a, (hl)      ;       7
+  jp  z, loop      ;      10  17 (27 worst)
 
-  ld  hl, ($1002)  ; src  20
-  ld  de, ($1004)  ; dst  20
-  ld  bc, ($1006)  ; len  20
+  add a            ;       4  a *= 2
+  add b            ;       4  a += table
+  ld  e, a         ;       4
+  ld  a, (de)      ;       7
+  inc e            ;       4
+  ld  ixl, a       ;       9
+  ld  a, (de)      ;       7
+  ld  ixh, a       ;       9
 
-  cp  a, 2         ;       7
-  jp  z, rd_timing ;      10  77 (118)
+  pop hl           ; src  10  ld  hl, ($1002)
+  pop de           ; dst  10  ld  de, ($1004)
+  pop bc           ; len  10  ld  bc, ($1006)
+  jp  ix           ;       8  (86+27)
 
-  ldir             ;      21/16
+end
+  xor a            ;       4
+  ld  ($1000), a   ;      13  (17)
+  jp  loop_prep
+
+; ---
+
+  BLOCK $38-$
+
+irq
+  ret
+
+; ---
+
+jtable
+  dw end
+  dw t_copy
+  dw t_rd_timing
+  dw t_idle_loop
+  dw t_timer_a
+  dw t_timer_b
+jtable_end
+  ld b, jtable_end ; ensure < $100
+
+; - 1 -
+t_copy
+  ldir             ;      21/16        ((de) <- (hl)) bc times
   jp  end          ;      10
 
-rd_timing
+; - 2 -
+t_rd_timing
   ld  d, h         ;       4
   ld  e, l         ;       4
   inc de           ;       6  14 (132)
@@ -32,22 +72,108 @@ loop_read
   or  a, c         ;       4
   jp  nz,loop_read ;      10  38
 
+end_vcnt
   ld  a, ($7f08)   ; vcnt 13
   ld  de, ($1004)  ; dst  20
   ld  (de), a      ;       7
   jp  end          ;      10  50
 
-; ---
+; - 3 -
+t_idle_loop
+  exx              ;       4  (waste cycles)
+  ld  b, $4        ;       7
+1 djnz 1b          ;      13  13*3+8=47
+  exx              ;       4
+  nop              ;       4  (66)
 
-  BLOCK $38-$
+  dec bc           ;       6
+  ld  a, b         ;       4
+  or  a, c         ;       4
+  jp  z,end_vcnt   ;      10
+  jp  t_idle_loop  ;      10  (66+34)
 
-irq
-  ret
-
-; ---
-
-end
+; helper for tests 5 and 6
+macro ld_a 2
+  ld  a, @2        ;       7
+  ld  @1, a        ;       7
+endmacro
+macro save_hvcount_unstable dst
+0
+  ld  bc, ($7f08)  ; hvc  20
+  ld  hl, ($7f08)  ; hvc  16
+  ld  a, b         ;       4
+  xor a, h         ;       4
+  and a, $c0       ;       7  hcnt bad sample?
+  jp  nz,0b        ;      10  (61 loop)
+  ld  a, c         ;       4
+  xor a, l         ;       4  vcnt changed while sampling?
+  jp  nz,0b        ;      10  (79 loop)
+  ld  (dst), hl    ;      20  (99)
+endmacro
+macro save_hvcount dst
+  ld  hl, $7f08    ; vcnt 10
+0
+  ld  a, (hl)      ;       7
+  cp  a, (hl)      ;       7
+  jp  nz,0b        ;      10
+  ld  (dst), a
+endmacro
+t_timer_prepare
+  ld  d, $2        ;       7
+  ld  hl, $4000    ; addr 10
+  ld  bc, $4001    ; data 14
+  ld  (hl), $26    ;      10
+  ld_a (bc), $ff   ;      14
+  ld  (hl), $27    ;      10
+  ld_a (bc), $3a   ;      14  enable timer+flag,clear
+0
+  ld  a, (hl)      ;       7
+  and d            ;       4
+  jp  z,0b         ;      10
   xor a            ;       4
-  ld  ($1000), a   ;      13
-  jp  loop         ;      10  27
+  ld  (bc), a      ;       7  stop (timer tick in (16*72*2)*7/15)
+  ld  a, ($7f08)   ; vcnt 13
+  exx              ;       4
+  save_hvcount $1102 ;    99+
+  exx              ;       4
+  ret              ;      10
+
+; - 4 -
+t_timer_a
+  ld  sp, $2000    ;      10
+  call t_timer_prepare ;  17++
+  ld  d, $1        ;       7
+  xor a            ;       4
+  ld  (hl), $24    ;      10
+  ld  (bc), a      ;       7
+  ld  (hl), $25    ;      10
+  ld  (bc), a      ;       7
+  ld  (hl), $27    ;      10
+  ld_a (bc), $35   ;      14  enable timer+flag,clear (  max 67
+  nop              ;       4  flag clear delay
+tim_a_loop
+  ld  a, (hl)      ;       7
+  and d            ;       4
+  jp  z,tim_a_loop ;      10
+  save_hvcount $1100 ;    99+
+  jp  end          ;      10
+
+; - 5 -
+t_timer_b
+  ld  sp, $2000    ;      10  copy-pasta from t_timer_a because I'm lazy
+  call t_timer_prepare ;  17++
+  ld  d, $2        ;       7
+  xor a            ;       4
+  ld  (hl), $26    ;      10
+  ld  (hl), $26    ;      10  dup for timing
+  ld_a (bc), $c0   ;      14
+  ld  (hl), $27    ;      10
+  ld_a (bc), $3a   ;      14  enable timer+flag,clear
+  nop              ;       4  flag clear delay
+tim_b_loop
+  ld  a, (hl)      ;       7
+  and d            ;       4
+  jp  z,tim_b_loop ;      10
+  save_hvcount $1100 ;    99+
+  jp  end          ;      10
 

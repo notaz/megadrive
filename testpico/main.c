@@ -438,22 +438,22 @@ static void t_dma_zero_fill_early(void)
 }
 
 #define expect(ok_, v0_, v1_) \
-if ((v0_) != (v1_)) { \
+do { if ((v0_) != (v1_)) { \
     printf("%s: %08x %08x\n", #v0_, v0_, v1_); \
     ok_ = 0; \
-}
+}} while (0)
 
 #define expect_range(ok_, v0_, vmin_, vmax_) \
-if ((v0_) < (vmin_) || (v0_) > (vmax_)) { \
+do { if ((v0_) < (vmin_) || (v0_) > (vmax_)) { \
     printf("%s: %02x /%02x-%02x\n", #v0_, v0_, vmin_, vmax_); \
     ok_ = 0; \
-}
+}} while (0)
 
 #define expect_bits(ok_, v0_, val_, mask_) \
-if (((v0_) & (mask_)) != (val_)) { \
+do { if (((v0_) & (mask_)) != (val_)) { \
     printf("%s: %04x & %04x != %04x\n", #v0_, v0_, mask_, val_); \
     ok_ = 0; \
-}
+}} while (0)
 
 static int t_dma_zero_wrap(void)
 {
@@ -968,7 +968,11 @@ static int t_z80mem_noreq_w(void)
     return ok;
 }
 
-#define Z80_CP_CYCLES(b) (118 + ((b) - 1) * 21 + 26 + 17)
+#define Z80_C_DISPATCH 113  // see z80_test.s80
+#define Z80_C_END       17
+#define Z80_C_END_VCNT  67
+
+#define Z80_CYLES_TEST1(b) (Z80_C_DISPATCH + ((b) - 1) * 21 + 26 + Z80_C_END)
 
 static int t_z80mem_vdp_r(void)
 {
@@ -986,7 +990,7 @@ static int t_z80mem_vdp_r(void)
     zram[0x1100] = zram[0x1101] = zram[0x1102] = 0x5a;
     mem_barrier();
     write16(0xa11100, 0x000);
-    burn10(Z80_CP_CYCLES(2) * 15 / 7 * 2 / 10);
+    burn10(Z80_CYLES_TEST1(2) * 15 / 7 / 10);
 
     write16(0xa11100, 0x100);
     while (read16(0xa11100) & 0x100)
@@ -1018,7 +1022,7 @@ static unused int t_z80mem_vdp_w(void)
     zram[0x1101] = 0x66;
     mem_barrier();
     write16(0xa11100, 0x000);
-    burn10(Z80_CP_CYCLES(2) * 15 / 7 * 2 / 10);
+    burn10(Z80_CYLES_TEST1(2) * 15 / 7 / 10);
 
     write16(0xa11100, 0x100);
     while (read16(0xa11100) & 0x100)
@@ -1047,7 +1051,34 @@ static int t_tim_loop(void)
     return ok;
 }
 
-#define Z80_RD_V_CYCLES(b) (132 + (b) * 38 + 50 + 17)
+static int t_tim_z80_loop(void)
+{
+    u8 pal = read8(0xa10001) & 0x40;
+    u8 *zram = (u8 *)0xa00000;
+    u16 z80_loops  = pal ? 3420*(313*2+1)/15/100 : 3420*(262*2+1)/15/100; // 2fr + 1ln
+    u16 _68k_loops = pal ? 3420*(313*2+1)/7/10   : 3420*(262*2+1)/7/10;
+    int ok = 1;
+
+    zram[0x1000] = 3; // idle loop, save vcnt
+    write16_z80le(&zram[0x1002], 0); // src (unused)
+    write16_z80le(&zram[0x1004], 0x1100); // vcnt dst
+    write16_z80le(&zram[0x1006], z80_loops); // x100 cycles
+    zram[0x1100] = 0;
+    mem_barrier();
+
+    vdp_wait_for_line_0();
+    write16(0xa11100, 0x000);
+    burn10(_68k_loops + (Z80_C_DISPATCH + Z80_C_END_VCNT) * 15 / 7 / 10);
+
+    write16(0xa11100, 0x100);
+    while (read16(0xa11100) & 0x100)
+        ;
+    expect(ok, zram[0x1000], 0);
+    expect(ok, zram[0x1100], 1);
+    return ok;
+}
+
+#define Z80_CYCLES_TEST2(b) (Z80_C_DISPATCH + (b) * 38 + Z80_C_END_VCNT)
 
 // 80 80 91 95-96
 static void z80_read_loop(u8 *zram, u16 src)
@@ -1063,7 +1094,7 @@ static void z80_read_loop(u8 *zram, u16 src)
 
     vdp_wait_for_line_0();
     write16(0xa11100, 0x000);
-    burn10(Z80_RD_V_CYCLES(pairs) * 15 / 7 * 4 / 10);
+    burn10(Z80_CYCLES_TEST2(pairs) * 15 / 7 * 2 / 10);
 
     write16(0xa11100, 0x100);
     while (read16(0xa11100) & 0x100)
@@ -1191,6 +1222,23 @@ static int t_tim_vcnt(void)
     return ok;
 }
 
+static int t_tim_vcnt_loops(void)
+{
+    const u16 *ram16 = (u16 *)0xfff004;
+    u8 pal = read8(0xa10001) & 0x40;
+    u16 i, lines = pal ? 313 : 262;
+    int ok = 1;
+
+    test_vcnt_loops();
+    expect(ok, ram16[-1*2+0], 0xff);
+    expect_range(ok, ram16[-1*2+1], 21, 22);
+    for (i = 0; i < lines; i++)
+        expect_range(ok, ram16[i*2+1], 19, 21);
+    expect(ok, ram16[lines*2+0], 0);
+    expect_range(ok, ram16[lines*2+1], 20, 21);
+    return ok;
+}
+
 static int t_tim_hblank_h40(void)
 {
     const u8 *r = (u8 *)0xff0000;
@@ -1260,6 +1308,113 @@ static int t_tim_vdp_as_cram_w(void)
     return ok;
 }
 
+static const u8 hcnt2tm[] =
+{
+    0x0a, 0x1d, 0x31, 0x44, 0x58, 0x6b, 0x7f, 0x92,
+    0xa6, 0xb9, 0xcc, 0x00, 0x00, 0x00, 0xe2, 0xf6
+};
+
+static int t_tim_ym_timer_z80(int is_b)
+{
+    u8 pal = read8(0xa10001) & 0x40;
+    u8 *zram = (u8 *)0xa00000;
+    u8 *z80 = zram;
+    u16 _68k_loops = 3420*(302+5+1)/7/10; // ~ (72*1024*2)/(3420./7)
+    u16 start, end, diff;
+    int ok = 1;
+
+    zram[0x1000] = 4 + is_b; // ym2612 timer a/b test
+    zram[0x1100] = zram[0x1101] = zram[0x1102] = zram[0x1103] = 0;
+    mem_barrier();
+
+    vdp_wait_for_line_0();
+    write16(0xa11100, 0x000);
+
+    burn10(_68k_loops + (Z80_C_DISPATCH + Z80_C_END_VCNT) * 15 / 7 / 10);
+
+    write16(0xa11100, 0x100);
+    while (read16(0xa11100) & 0x100)
+        ;
+    mem_barrier();
+    expect(ok, zram[0x1000], 0);
+    (void)hcnt2tm;
+    //start = ((u16)zram[0x1102] << 8) | hcnt2tm[zram[0x1103] >> 4];
+    //end   = ((u16)zram[0x1100] << 8) | hcnt2tm[zram[0x1101] >> 4];
+    start = zram[0x1102];
+    end   = zram[0x1100];
+    diff = end - start;
+    if (pal)
+      expect_range(ok, diff, 0xf4, 0xf6);
+    else
+      expect_range(ok, diff, 0x27, 0x29);
+    write8(&z80[0x4001], 0); // stop, but should keep the flag
+    mem_barrier();
+    burn10(32*6/10); // busy bit, 32 FM ticks (M/7/6)
+    if (is_b) {
+      expect(ok, z80[0x4000], 2);
+      write8(&z80[0x4001], 0x20); // reset flag (reg 0x27, set up by z80)
+    }
+    else {
+      expect(ok, z80[0x4000], 1);
+      write8(&z80[0x4001], 0x10);
+    }
+    mem_barrier();
+    burn10(32*6/10);
+    expect(ok, z80[0x4000], 0);
+    return ok;
+}
+
+static int t_tim_ym_timera_z80(void)
+{
+    return t_tim_ym_timer_z80(0);
+}
+
+static int t_tim_ym_timerb_z80(void)
+{
+    return t_tim_ym_timer_z80(1);
+}
+
+static int t_tim_ym_timerb_stop(void)
+{
+    const struct {
+        //u8 vcnt_start;
+        //u8 hcnt_start;
+        u16 vcnt_start;
+        u16 stat0;
+        //u8 vcnt_end;
+        //u8 hcnt_end;
+        u16 vcnt_end;
+        u16 stat1;
+    } *t = (void *)0xfff000;
+    u8 *z80 = (u8 *)0xa00000;
+    u16 diff;
+    int ok = 1;
+    write16(0xa11100, 0x100);
+    while (read16(0xa11100) & 0x100)
+        ;
+    test_ym_stopped_tick();
+    mem_barrier();
+    //start = ((u16)t->vcnt_start << 8) | hcnt2tm[t->hcnt_start >> 4];
+    //end   = ((u16)t->vcnt_end   << 8) | hcnt2tm[t->hcnt_end   >> 4];
+    //diff = end - start;
+    diff = t->vcnt_end - t->vcnt_start;
+    //expect_range(ok, diff, 0x492, 0x5c2); // why so much variation?
+    expect_range(ok, diff, 4, 5);
+    expect(ok, t->stat0, 0);
+    expect(ok, t->stat1, 2);
+    expect(ok, z80[0x4000], 2);
+    write8(&z80[0x4001], 0x30);
+    return ok;
+}
+
+static int t_tim_ym_timer_ab_sync(void)
+{
+    u16 v = test_ym_ab_sync();
+    int ok = 1;
+    expect(ok, v, 3);
+    return ok;
+}
+
 struct irq_test {
     u16 cnt;
     union {
@@ -1269,16 +1424,24 @@ struct irq_test {
     u16 pad;
 };
 
+// broken on fresh boot due to uknown reasons
 static int t_irq_hint(void)
 {
     struct irq_test *it = (void *)0xfff000;
+    struct irq_test *itv = it + 1;
     int ok = 1;
+
+    memset_(it, 0, sizeof(*it) * 2);
+    memcpy_((void *)0xff0100, test_hint, test_hint_end - test_hint);
+    memcpy_((void *)0xff0140, test_vint, test_vint_end - test_vint);
+
+    // without this, tests fail after cold boot
+    while (!(read16(VDP_CTRL_PORT) & 8))
+        /* not blanking */;
 
     // for more fun, disable the display
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD);
 
-    it->cnt = it->first.hv = it->last.hv = 0;
-    memcpy_((void *)0xff0100, test_hint, test_hint_end - test_hint);
     VDP_setReg(10, 0);
     while (read8(VDP_HV_COUNTER) != 100)
         ;
@@ -1291,6 +1454,7 @@ static int t_irq_hint(void)
     move_sr(0x2700);
     expect(ok, it->first.v, 229);      // pending irq trigger
     expect(ok, it->cnt, 1);
+    expect(ok, itv->cnt, 0);
 
     // count irqs
     it->cnt = it->first.hv = it->last.hv = 0;
@@ -1791,15 +1955,21 @@ static const struct {
     { T_MD, t_z80mem_vdp_r,        "z80 vdp read" },
     // { t_z80mem_vdp_w,        "z80 vdp write" }, // hang
     { T_MD, t_tim_loop,            "time loop" },
+    { T_MD, t_tim_z80_loop,        "time z80 loop" },
     { T_MD, t_tim_z80_ram,         "time z80 ram" },
     { T_MD, t_tim_z80_ym,          "time z80 ym2612" },
     { T_MD, t_tim_z80_vdp,         "time z80 vdp" },
     { T_MD, t_tim_z80_bank_rom,    "time z80 bank rom" },
     { T_MD, t_tim_vcnt,            "time V counter" },
+    { T_MD, t_tim_vcnt_loops,      "time vcnt loops" },
     { T_MD, t_tim_hblank_h40,      "time hblank h40" },
     { T_MD, t_tim_hblank_h32,      "time hblank h32" },
     { T_MD, t_tim_vdp_as_vram_w,   "time vdp vram w" },
     { T_MD, t_tim_vdp_as_cram_w,   "time vdp cram w" },
+    { T_MD, t_tim_ym_timera_z80,   "time timer a z80" },
+    { T_MD, t_tim_ym_timerb_z80,   "time timer b z80" },
+    { T_MD, t_tim_ym_timerb_stop,  "timer b stop" },
+    { T_MD, t_tim_ym_timer_ab_sync,"timer ab sync" },
     { T_MD, t_irq_hint,            "irq4 / line" },
     { T_MD, t_irq_both_cpu_unmask, "irq both umask" },
     { T_MD, t_irq_ack_v_h,         "irq ack v-h" },
@@ -1844,7 +2014,8 @@ static void setup_z80(void)
     write16(0xa11100, 0x000);
     burn10(1);
     write16(0xa11200, 0x100);
-    burn10(1);
+
+    burn10(50 * 15 / 7 / 10);  // see z80_test.s80
 
     // take back the bus
     write16(0xa11100, 0x100);
@@ -1854,9 +2025,9 @@ static void setup_z80(void)
 
 static void wait_next_vsync(void)
 {
-    while (read16(VDP_CTRL_PORT) & 8)
+    while (read16(VDP_CTRL_PORT) & SR_VB)
         /* blanking */;
-    while (!(read16(VDP_CTRL_PORT) & 8))
+    while (!(read16(VDP_CTRL_PORT) & SR_VB))
         /* not blanking */;
 }
 
@@ -1982,8 +2153,15 @@ int main()
     printf_ypos = 0;
     printf("     ");
 
-    while (!(get_input() & BTNM_A))
+    for (i = 0; i < 60*60 && !(get_input() & BTNM_A); i++)
         wait_next_vsync();
+#ifndef PICO
+    // blank due to my lame tv being burn-in prone
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD);
+#endif
+    while (!(get_input() & BTNM_A))
+        burn10(488*100/10);
+    VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
 
 
     {

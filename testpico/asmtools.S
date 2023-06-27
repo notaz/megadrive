@@ -1,5 +1,6 @@
 # Assemble with gas
 #   --register-prefix-optional --bitwise-or
+# reminder: d2-d7/a2-a6 are callee-save
 
 .macro ldarg  arg, stacksz, reg
     move.l (4 + \arg * 4 + \stacksz)(%sp), \reg
@@ -40,7 +41,7 @@ write16_x16:
 
 # read single phase from controller
 #  d0 - result
-#  destroys d1,d2
+#  destroys d1
 .global get_input
 get_input:
 	move.b		#0x40,(0xa10003)
@@ -193,6 +194,36 @@ test_vcnt_vb:
     move.l      d4, (a2)+   /* *ram++ = count */
 
     movem.l     (sp)+, d2-d7/a2
+    rts
+
+.global test_vcnt_loops
+test_vcnt_loops:
+    movem.l     d2, -(sp)
+    movea.l     #0xc00007, a0
+    movea.l     #0xfff000, a1
+    move.b      #0xff, d0       /* d0 = current_vcnt */
+    moveq.l     #0, d1          /* d1 = loop counter */
+    move.w      #315-1, d2      /* d2 = line limit */
+0:
+    btst        #3, (a0)
+    beq         0b          /* not blanking */
+0:
+    btst        #3, (a0)
+    bne         0b          /* blanking */
+
+    addq.w      #1, a0
+0:
+    addq.w      #1, d1      /*  4 */
+    cmp.b       (a0), d0    /*  8 vcnt changed? */
+    beq         0b          /* 10 */
+
+    move.w      d0, (a1)+   /*  8 save */
+    move.w      d1, (a1)+
+    move.b      (a0), d0    /*  8 new vcnt */
+    moveq.l     #0, d1
+    dbra        d2, 0b
+
+    movem.l     (sp)+, d2
     rts
 
 .global test_hint
@@ -376,6 +407,105 @@ test_hb:
     test_lb_s   d6, a1
     test_lb_s   d7, a1
     movem.l     (sp)+, d2-d7
+    rts
+
+.macro ymwrite  areg, dreg addr dat
+    move.b      \addr, (\areg) /* 12 addr */
+    nbcd        d0             /*  6 delay to reach 17 ym cycles (M/7) */
+    move.b      \dat, (\dreg)  /* 12 data */
+.endm
+
+.global test_ym_stopped_tick
+test_ym_stopped_tick:
+    movem.l     a2-a3, -(sp)
+    movea.l     #0xa04000, a0
+    movea.l     #0xa04001, a1
+    movea.l     #0xc00007, a2
+    movea.l     #0xfff000, a3
+
+    ymwrite     a0, a1, #0x27, #0x30  /* 30 disable, clear */
+    ymwrite     a0, a1, #0x26, #0xff  /* 30 timer b shortest interval */
+    move.b      #0x27, (a0)           /* 12 addr prep */
+0:
+    btst        #3, (a2)
+    beq         0b                    /* not blanking */
+0:
+    btst        #3, (a2)
+    bne         0b                    /* blanking */
+
+    addq.l      #1, a2
+0:
+    tst.b       (a2)
+    bne         0b                    /* not line 0 - waiting for sequential vcnt */
+
+    move.b      #0x0a, (a1)           /* 12 start timer b  */
+    moveq.l     #0, d0
+    moveq.l     #2, d1
+0:
+    move.b      (a0), d0
+    and.b       d1, d0
+    beq         0b
+0:
+#    move.w      (a2), (a3)+           /* 12 save hvcnt */
+    move.b      (a2), d0
+    cmp.b       (a2), d0
+    bne         0b
+    move.w      d0, (a3)+
+    move.b      #0x30, (a1)           /* 12 stop b, clear  */
+
+    move.w      #(1900/10-1), d0      /* waste cycles */
+0:
+    dbra        d0, 0b
+    moveq.l     #0, d0
+
+    move.w      (a0), (a3)+           /* 12 save status */
+    move.b      #0x0a, (a1)           /* 12 start b  */
+0:
+    move.b      (a0), d0
+    and.b       d1, d0
+    beq         0b
+
+0:
+#    move.w      (a2), (a3)+           /* 12 save hvcnt */
+    move.b      (a2), d1
+    cmp.b       (a2), d1
+    bne         0b
+    move.w      d1, (a3)+
+    move.w      d0, (a3)+             /* 12 save status */
+
+    movem.l     (sp)+, a2-a3
+    rts
+
+.global test_ym_ab_sync
+test_ym_ab_sync:
+    movea.l     #0xa04000, a0
+    movea.l     #0xa04001, a1
+
+    ymwrite     a0, a1, #0x27, #0x30  /* 30 disable, clear */
+    ymwrite     a0, a1, #0x24, #0xfc  /* 30 timer a */
+    ymwrite     a0, a1, #0x25, #0x01  /* 30  =15 - why 15? expected 16 */
+    ymwrite     a0, a1, #0x26, #0xff  /* 30 timer b shortest interval */
+    move.b      #0x27, (a0)           /* 12 addr prep */
+    nop
+    nop
+
+    move.b      #0x0a, (a1)           /* 12 start timer b  */
+    moveq.l     #0, d0
+    moveq.l     #2, d1
+0:
+    move.b      (a0), d0              /*  8 */
+    and.b       d1, d0                /*  4 */
+    beq         0b                    /* 10|8 */
+0:
+    move.b      #0x3f, (a1)           /* 12 start a, clear  */
+    moveq.l     #3, d1                /* 12 cycles for old flag to clear itself */
+    nop
+    nop
+0:
+    move.b      (a0), d0
+    and.b       d1, d0
+    beq         0b
+    move.b      (a0), d0              /* re-read, else very occasionally get 1 */
     rts
 
 # vim:filetype=asmM68k:ts=4:sw=4:expandtab

@@ -20,10 +20,13 @@ void  memcpy_(void *dst, const void *src, unsigned short size);
 void  memset_(void *dst, int d, unsigned short size);
 
 void test_vcnt_vb(void);
+void test_vcnt_loops(void);
 void test_f(void);
 void test_hb(void);
 void test_v_h_2(void);
 void test_h_v_2(void);
+void test_ym_stopped_tick(void);
+short test_ym_ab_sync(void);
 
 extern const char test_hint[];
 extern const char test_hint_end[];
