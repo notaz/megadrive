@@ -16,12 +16,12 @@ exc_tab:
     .ascii "J               "
     .long  0x000000,0x3fffff
     .long  0xff0000,0xffffff
-    .ascii "RA"; .byte 0xf8,0x20                     /* 1b0 */
-    .long  0x200001,0x20ffff                         /* 1b4 */
-    .ascii "    "                                    /* 1bc */
-    .ascii "                        "                /* 1c0 */
-    .ascii "                        "
-    .ascii "JUE             "                        /* 1f0 */
+    .ascii "RA"; .byte 0xf8,0x20                      /* 1b0 */
+    .long  0x200001,0x20ffff                          /* 1b4 */
+    .ascii "    "                                     /* 1bc */
+    .ascii "        "                                 /* 1c0 */
+    .ascii "src: https://github.com/notaz/megadrive/" /* 1c8 */
+    .ascii "JUE             "                         /* 1f0 */
 
 # mystery landing area for reset with 32X on and RV=1
 # 2c8 - 304 in multiples of 4

@@ -12,11 +12,11 @@
 
 .global burn10 /* u16 val */
 burn10:
-    ldarg       0, 0, d0
+    ldargw      0, 0, d0
     subq.l      #1, d0
 0:
-    dbra        d0, 0b
-    rts
+    dbra        d0, 0b      /* 10|14 */
+    rts                     /* 16 */
 
 .global write16_x16 /* u32 a, u16 count, u16 d */
 write16_x16:
@@ -66,6 +66,16 @@ get_input:
 	and.w		d0,d1		/* what changed now */
 .endif
 	rts
+
+.global get_line
+get_line:
+    movea.l     #0xc00008, a0
+    moveq.l     #0, d0
+0:
+    move.b      (a0), d0    /*  8 d2 = vcnt */
+    cmp.b       (a0), d0    /*  8 reread for super-rare corruption (torn read) */
+    bne         0b
+    rts
 
 .global write_and_read1 /* u32 a, u16 d, void *dst */
 write_and_read1:
@@ -483,7 +493,7 @@ test_ym_ab_sync:
 
     ymwrite     a0, a1, #0x27, #0x30  /* 30 disable, clear */
     ymwrite     a0, a1, #0x24, #0xfc  /* 30 timer a */
-    ymwrite     a0, a1, #0x25, #0x01  /* 30  =15 - why 15? expected 16 */
+    ymwrite     a0, a1, #0x25, #0x01  /* 30  =15 */
     ymwrite     a0, a1, #0x26, #0xff  /* 30 timer b shortest interval */
     move.b      #0x27, (a0)           /* 12 addr prep */
     nop
@@ -496,15 +506,19 @@ test_ym_ab_sync:
     move.b      (a0), d0              /*  8 */
     and.b       d1, d0                /*  4 */
     beq         0b                    /* 10|8 */
-0:
-    move.b      #0x3f, (a1)           /* 12 start a, clear  */
-    move.w      #(1800/10-1), d0      /* waste cycles */
-0:
-    dbra        d0, 0b
 
-    ymwrite     a0, a1, #0x24, #0x00  /* 30 show that rewriting count */
-    ymwrite     a0, a1, #0x25, #0x00  /* 30 does nothing */
-    ymwrite     a0, a1, #0x26, #0x00  /* 30 */
+    move.b      #0x3f, (a1)           /* 12 start a, clear  */
+
+    move.w      #(488/10), d0         /* waste cycles */
+0:  dbra        d0, 0b
+
+    ymwrite     a0, a1, #0x24, #0xf0  /* 30 show that rewriting count */
+    ymwrite     a0, a1, #0x25, #0x00  /* 30 does nothing until timer expires */
+
+    move.w      #(488*2/10), d0       /* waste cycles */
+0:  dbra        d0, 0b
+
+    ymwrite     a0, a1, #0x26, #0xfc  /* 30 same for timer b */
     ymwrite     a0, a1, #0x27, #0x0f  /* 30 setting already set bits too  */
     moveq.l     #0, d0
     moveq.l     #3, d1
@@ -513,6 +527,22 @@ test_ym_ab_sync:
     and.b       d1, d0
     beq         0b
     move.b      (a0), d0              /* re-read, else very occasionally get 1 */
+    rts
+
+.global test_ym_ab_sync2
+test_ym_ab_sync2:
+    movea.l     #0xa04000, a0
+    movea.l     #0xa04001, a1
+
+#    move.b      #0x3f, (a1)           /* 12 clear  */
+    moveq.l     #0, d0
+    moveq.l     #3, d1
+    nop                               /*  4 need ~12c to clear */
+0:
+    move.b      (a0), d0              /*  8 */
+    and.b       d1, d0                /*  4 */
+    beq         0b                    /* 10|8 */
+    move.b      (a0), d0              /* re-read */
     rts
 
 # vim:filetype=asmM68k:ts=4:sw=4:expandtab

@@ -11,7 +11,8 @@ void write16_x16(unsigned int addr, unsigned short count, short data);
 #define BTNM_D (1 << 1)
 #define BTNM_U (1 << 0)
 
-int   get_input(void);
+short get_input(void);
+short get_line(void);
 void  write_and_read1(unsigned int a, unsigned short d, void *dst);
 void  move_sr(unsigned short sr);
 short move_sr_and_read(unsigned short sr, unsigned int a);
@@ -27,6 +28,7 @@ void test_v_h_2(void);
 void test_h_v_2(void);
 void test_ym_stopped_tick(void);
 short test_ym_ab_sync(void);
+short test_ym_ab_sync2(void);
 
 extern const char test_hint[];
 extern const char test_hint_end[];
