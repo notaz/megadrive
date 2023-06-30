@@ -1409,19 +1409,34 @@ static int t_tim_ym_timerb_stop(void)
 
 static int t_tim_ym_timer_ab_sync(void)
 {
-    u16 v1, v2, v3, start, line_diff;
+    u16 v1, v2, v3, v4, v5, ln0, ln1, ln2;
     int ok = 1;
+
+    vdp_wait_for_line_0();
     v1 = test_ym_ab_sync();
-    start = get_line();
-    write8(0xa04001, 0x3f);   // clear
-    burn10(3420*11/7/10);     // ~11 scanlines
+
+    ln0 = get_line();
+    burn10(3420*15/7/10);     // ~15 scanlines
+    write8(0xa04001, 0x3f);   // clear, no reload
+    burn10(12);               // wait for busy to clear
     v2 = read8(0xa04000);
     v3 = test_ym_ab_sync2();
-    line_diff = get_line() - start;
+
+    ln1 = get_line();
+    burn10(3420*15/7/10);     // ~15 scanlines
+    v4 = test_ym_ab_sync2();
+
+    ln2 = get_line();
+    burn10(3420*30/7/10);     // ~35 scanlines
+    v5 = read8(0xa04000);
+
     expect(ok, v1, 3);
     expect(ok, v2, 0);
     expect(ok, v3, 3);
-    expect_range(ok, line_diff, 18, 19);
+    expect(ok, v4, 2);
+    expect(ok, v5, 0);
+    expect_range(ok, ln1-ln0, 18, 19);
+    expect_range(ok, ln2-ln1, 32, 34); // almost always 33
     return ok;
 }
 

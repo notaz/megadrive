@@ -534,7 +534,7 @@ test_ym_ab_sync2:
     movea.l     #0xa04000, a0
     movea.l     #0xa04001, a1
 
-#    move.b      #0x3f, (a1)           /* 12 clear  */
+    move.b      #0x0f, (a1)           /* 12 enable  */
     moveq.l     #0, d0
     moveq.l     #3, d1
     nop                               /*  4 need ~12c to clear */
@@ -543,6 +543,7 @@ test_ym_ab_sync2:
     and.b       d1, d0                /*  4 */
     beq         0b                    /* 10|8 */
     move.b      (a0), d0              /* re-read */
+    move.b      #0x3c, (a1)           /* 12 clear, disable  */
     rts
 
 # vim:filetype=asmM68k:ts=4:sw=4:expandtab
