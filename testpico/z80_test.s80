@@ -21,9 +21,9 @@ loop
   ld  e, a         ;       4
   ld  a, (de)      ;       7
   inc e            ;       4
-  ld  ixl, a       ;       9
+  ld  ixl, a       ;       8
   ld  a, (de)      ;       7
-  ld  ixh, a       ;       9
+  ld  ixh, a       ;       8
 
   pop hl           ; src  10  ld  hl, ($1002)
   pop de           ; dst  10  ld  de, ($1004)
@@ -149,7 +149,7 @@ t_timer_a
   ld  (hl), $25    ;      10
   ld  (bc), a      ;       7
   ld  (hl), $27    ;      10
-  ld_a (bc), $35   ;      14  enable timer+flag,clear (  max 67
+  ld_a (bc), $35   ;      14  enable timer+flag,clear
   nop              ;       4  flag clear delay
 tim_a_loop
   ld  a, (hl)      ;       7
