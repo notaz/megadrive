@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include "common.h"
 #include "asmtools.h"
+//#pragma GCC diagnostic ignored "-Wunused-function"
 
 #define VDP_DATA_PORT    0xC00000
 #define VDP_CTRL_PORT    0xC00004
@@ -231,6 +232,9 @@ static noinline int printf(const char *fmt, ...)
             for (j--; j >= 0; j--)
                 buf[d++] = hexchars[(uval >> j * 4) & 0x0f];
             break;
+        case 'c':
+            buf[d++] = va_arg(ap, int);
+            break;
         case 's':
             s = va_arg(ap, char *);
             while (*s && d < PRINTF_LEN)
@@ -437,9 +441,17 @@ static void t_dma_zero_fill_early(void)
     ram[3] = read32(VDP_DATA_PORT);
 }
 
+#define R_SKIP 0x5a5a
+
 #define expect(ok_, v0_, v1_) \
 do { if ((v0_) != (v1_)) { \
     printf("%s: %08x %08x\n", #v0_, v0_, v1_); \
+    ok_ = 0; \
+}} while (0)
+
+#define expect_sh2(ok_, sh2_, v0_, v1_) \
+do { if ((v0_) != (v1_)) { \
+    printf("%csh2: %08x %08x\n", sh2_ ? 's' : 'm', v0_, v1_); \
     ok_ = 0; \
 }} while (0)
 
@@ -1745,53 +1757,7 @@ static int t_irq_f_flag_h32(void)
 
 // 32X
 
-static int t_32x_init(void)
-{
-    void (*do_32x_enable)(void) = (void *)0xff0040;
-    u32 M_OK = MKLONG('M','_','O','K');
-    u32 S_OK = MKLONG('S','_','O','K');
-    u32 *r = (u32 *)0xa15100;
-    u16 *r16 = (u16 *)r;
-    int i, ok = 1;
-
-    //v1070 = read32(0x1070);
-
-    /* what does REN mean exactly?
-     * Seems to be sometimes clear after reset */
-    for (i = 0; i < 1000000; i++)
-        if (read16(r16) & 0x80)
-            break;
-    expect(ok, r16[0x00/2], 0x82);
-    expect(ok, r16[0x02/2], 0);
-    expect(ok, r16[0x04/2], 0);
-    expect(ok, r16[0x06/2], 0);
-    expect(ok, r[0x14/4], 0);
-    expect(ok, r[0x18/4], 0);
-    expect(ok, r[0x1c/4], 0);
-    write32(&r[0x20/4], 0); // master resp
-    write32(&r[0x24/4], 0); // slave resp
-    write32(&r[0x28/4], 0);
-    write32(&r[0x2c/4], 0);
-
-    // could just set RV, but BIOS reads ROM, so can't
-    memcpy_(do_32x_enable, x32x_enable,
-            x32x_enable_end - x32x_enable);
-    do_32x_enable();
-
-    expect(ok, r16[0x00/2], 0x83);
-    expect(ok, r16[0x02/2], 0);
-    expect(ok, r16[0x04/2], 0);
-    expect(ok, r16[0x06/2], 1); // RV
-    expect(ok, r[0x14/4], 0);
-    expect(ok, r[0x18/4], 0);
-    expect(ok, r[0x1c/4], 0);
-    expect(ok, r[0x20/4], M_OK);
-    while (!read16(&r16[0x24/2]))
-        ;
-    expect(ok, r[0x24/4], S_OK);
-    write32(&r[0x20/4], 0);
-    return ok;
-}
+#define IRQ_CNT_FB_BASE 0x1ff00
 
 static void x32_cmd(enum x32x_cmd cmd, u32 a0, u32 a1, u16 is_slave)
 {
@@ -1819,15 +1785,190 @@ static void x32_cmd(enum x32x_cmd cmd, u32 a0, u32 a1, u16 is_slave)
     }
 }
 
+static int t_32x_reset_btn(void)
+{
+    void (*do_32x_disable)(void) = (void *)0xff0040;
+    u32 *fbl_icnt = (u32 *)(0x840000 + IRQ_CNT_FB_BASE);
+    u16 *m_icnt = (u16 *)fbl_icnt;
+    u16 *s_icnt = m_icnt + 8;
+    u32 *r32 = (u32 *)0xa15100;
+    u16 *r16 = (u16 *)r32, i, s;
+    u8 *r8 = (u8 *)r32;
+    u32 *rl = (u32 *)0;
+    int ok = 1;
+
+    if (!(read16(r16) & 1))
+        return R_SKIP;
+
+    expect(ok, r16[0x00/2], 0x8083);
+
+    write8(r8, 0x00); // FM=0
+    mem_barrier();
+    expect(ok, r16[0x00/2], 0x83);
+    expect(ok, r16[0x02/2], 0);
+    expect(ok, r16[0x04/2], 3);
+    expect(ok, r16[0x06/2], 1); // RV (set in sega_gcc.s reset handler)
+    expect(ok, r32[0x08/4], 0x5a5a08);
+    expect(ok, r32[0x0c/4], 0x5a5a0c);
+    expect(ok, r16[0x10/2], 0x5a10);
+    expect(ok, r32[0x14/4], 0);
+    expect(ok, r32[0x18/4], 0);
+    expect(ok, r32[0x1c/4], 0);
+    expect(ok, r32[0x20/4], 0x00005a20);
+    expect(ok, r32[0x24/4], 0x5a5a5a24);
+    expect(ok, r32[0x28/4], 0x5a5a5a28);
+    expect(ok, r32[0x2c/4], 0x5a5a5a2c);
+    if (!(r16[0x00/2] & 0x8000)) {
+        expect(ok, r8 [0x81], 0);
+        expect(ok, r16[0x82/2], 0);
+        expect(ok, r16[0x84/2], 0);
+        expect(ok, r16[0x86/2], 0);
+        //expect(ok, r16[0x88/2], 0); // triggers fill?
+        expect(ok, r8 [0x8b] & ~2, 0); // FEN toggles periodically?
+        expect(ok, r16[0x8c/2], 0);
+        expect(ok, r16[0x8e/2], 0);
+    }
+    r32[0x20/4] = r32[0x24/4] = r32[0x28/4] = r32[0x2c/4] = 0;
+    for (s = 0; s < 2; s++)
+    {
+        x32_cmd(CMD_READ32, 0x20004000, 0, s); // not cleared by hw
+        expect_sh2(ok, s, r32[0x24/4], 0x02020000); // ADEN | cmd
+        // t_32x_sh_defaults will test the other bits
+    }
+    // setup for t_32x_sh_defaults
+    x32_cmd(CMD_WRITE8, 0x20004001, 0, 0);
+    x32_cmd(CMD_WRITE8, 0x20004001, 0, 1);
+
+    for (i = 0; i < 7; i++) {
+        expect(ok, m_icnt[i], 0x100);
+        expect(ok, s_icnt[i], 0x100);
+    }
+    expect(ok, m_icnt[7], 0x101); // VRES happened
+    expect(ok, s_icnt[7], 0x101);
+
+    memcpy_(do_32x_disable, x32x_disable,
+            x32x_disable_end - x32x_disable);
+    do_32x_disable();
+
+    expect(ok, r16[0x00/2], 0x82);
+    expect(ok, r16[0x02/2], 0);
+    expect(ok, r16[0x04/2], 3);
+    expect(ok, r16[0x06/2], 1); // RV
+    expect(ok, r32[0x08/4], 0x5a5a08);
+    expect(ok, r32[0x0c/4], 0x5a5a0c);
+    expect(ok, r16[0x10/2], 0x5a10);
+    expect(ok, rl[0x04/4], 0x000800);
+
+    // setup for t_32x_init, t_32x_sh_defaults
+    r16[0x04/2] = 0;
+    r16[0x06/2] = 0;      // can just set without ADEN
+    r16[0x10/2] = 0x1234; // warm reset indicator
+    mem_barrier();
+    expect(ok, r16[0x06/2], 0); // RV
+    return ok;
+}
+
+static int t_32x_init(void)
+{
+    void (*do_32x_enable)(void) = (void *)0xff0040;
+    u32 M_OK = MKLONG('M','_','O','K');
+    u32 S_OK = MKLONG('S','_','O','K');
+    u32 *r32 = (u32 *)0xa15100;
+    u16 *r16 = (u16 *)r32;
+    u8 *r8 = (u8 *)r32;
+    int i, ok = 1;
+
+    //v1070 = read32(0x1070);
+
+    /* what does REN mean exactly?
+     * Seems to be sometimes clear after reset */
+    for (i = 0; i < 1000000; i++)
+        if (read16(r16) & 0x80)
+            break;
+    expect(ok, r16[0x00/2], 0x82);
+    expect(ok, r16[0x02/2], 0);
+    expect(ok, r16[0x04/2], 0);
+    expect(ok, r16[0x06/2], 0);
+    expect(ok, r8 [0x08], 0);
+    //expect(ok, r32[0x08/4], 0); // garbage 24bit
+    expect(ok, r8 [0x0c], 0);
+    //expect(ok, r32[0x0c/4], 0); // garbage 24bit
+    if (r16[0x10/2] != 0x1234)    // warm reset
+        expect(ok, r16[0x10/2], 0xffff);
+    expect(ok, r16[0x12/2], 0);
+    expect(ok, r32[0x14/4], 0);
+    expect(ok, r32[0x18/4], 0);
+    expect(ok, r32[0x1c/4], 0);
+    //expect(ok, r8 [0x81], 0); // VDP; hangs without ADEN
+    r32[0x20/4] = 0; // master resp
+    r32[0x24/4] = 0; // slave resp
+    r32[0x28/4] = 0;
+    r32[0x2c/4] = 0;
+
+    // these have garbage or old values (survive MD's power cycle)
+    r32[0x08/4] = 0;
+    r32[0x0c/4] = 0;
+
+    // could just set RV, but BIOS reads ROM, so can't
+    memcpy_(do_32x_enable, x32x_enable,
+            x32x_enable_end - x32x_enable);
+    do_32x_enable();
+
+    expect(ok, r16[0x00/2], 0x83);
+    expect(ok, r16[0x02/2], 0);
+    expect(ok, r16[0x04/2], 0);
+    expect(ok, r16[0x06/2], 1); // RV
+    expect(ok, r32[0x14/4], 0);
+    expect(ok, r32[0x18/4], 0);
+    expect(ok, r32[0x1c/4], 0);
+    expect(ok, r32[0x20/4], M_OK);
+    while (!read16(&r16[0x24/2]))
+        ;
+    expect(ok, r32[0x24/4], S_OK);
+    write32(&r32[0x20/4], 0);
+    if (!(r16[0x00/2] & 0x8000)) {
+        expect(ok, r8 [0x81], 0);
+        expect(ok, r16[0x82/2], 0);
+        expect(ok, r16[0x84/2], 0);
+        expect(ok, r16[0x86/2], 0);
+        //expect(ok, r16[0x88/2], 0); // triggers fill?
+        expect(ok, r8 [0x8b] & ~2, 0);
+        expect(ok, r16[0x8c/2], 0);
+        expect(ok, r16[0x8e/2], 0);
+    }
+    return ok;
+}
+
 static int t_32x_echo(void)
 {
     u16 *r = (u16 *)0xa15120;
     int ok = 1;
 
     x32_cmd(CMD_ECHO, 0x12340000, 0, 0);
-    expect(ok, r[0x06/2], 0x1234);
+    expect_sh2(ok, 0, r[0x06/2], 0x1234);
     x32_cmd(CMD_ECHO, 0x23450000, 0, 1);
-    expect(ok, r[0x06/2], 0xa345);
+    expect_sh2(ok, 1, r[0x06/2], 0xa345);
+    return ok;
+}
+
+static int t_32x_sh_defaults(void)
+{
+    u32 *r32 = (u32 *)0xa15120;
+    int ok = 1, s;
+
+    for (s = 0; s < 2; s++)
+    {
+        x32_cmd(CMD_READ32, 0x20004000, 0, s);
+        expect_sh2(ok, s, r32[0x04/4], 0x02000000); // ADEN
+        x32_cmd(CMD_READ32, 0x20004004, 0, s);
+        expect_sh2(ok, s, r32[0x04/4], 0x00004001); // Empty Rv
+        x32_cmd(CMD_READ32, 0x20004008, 0, s);
+        expect_sh2(ok, s, r32[0x04/4], 0);
+        x32_cmd(CMD_READ32, 0x2000400c, 0, s);
+        expect_sh2(ok, s, r32[0x04/4], 0);
+        x32_cmd(CMD_GETGBR, 0, 0, s);
+        expect_sh2(ok, s, r32[0x04/4], 0x20004000);
+    }
     return ok;
 }
 
@@ -1900,50 +2041,124 @@ static int t_32x_md_fb(void)
 static int t_32x_sh_fb(void)
 {
     u32 *fbl = (u32 *)0x840000;
+    u8 *r8 = (u8 *)0xa15100;
     int ok = 1;
 
+    if (read8(r8) & 0x80)
+        write8(r8, 0x00); // FM=0
     fbl[0] = 0x12345678;
     fbl[1] = 0x89abcdef;
     mem_barrier();
-    write8(0xa15100, 0x80); // FM=1
-    x32_cmd(CMD_WRITE8,  0x24000000, 0, 0);
-    x32_cmd(CMD_WRITE8,  0x24020001, 0, 0);
-    x32_cmd(CMD_WRITE16, 0x24000002, 0, 0);
-    x32_cmd(CMD_WRITE16, 0x24020000, 0, 0);
+    write8(r8, 0x80);     // FM=1
+    x32_cmd(CMD_WRITE8,  0x24000000, 0, 0); // should ignore
+    x32_cmd(CMD_WRITE8,  0x24020001, 0, 0); // ignore
+    x32_cmd(CMD_WRITE16, 0x24000002, 0, 0); // ok
+    x32_cmd(CMD_WRITE16, 0x24020000, 0, 0); // ignore
     x32_cmd(CMD_WRITE32, 0x24020004, 0x5a0000a5, 1);
-    write8(0xa15100, 0x00); // FM=0
+    write8(r8, 0x00);     // FM=0
     mem_barrier();
     expect(ok, fbl[0], 0x12340000);
     expect(ok, fbl[1], 0x5aabcda5);
     return ok;
 }
 
-static int t_32x_disable(void)
+static int t_32x_irq(void)
 {
-    void (*do_32x_disable)(void) = (void *)0xff0040;
+    u32 *fbl_icnt = (u32 *)(0x840000 + IRQ_CNT_FB_BASE);
+    u16 *m_icnt = (u16 *)fbl_icnt;
+    u16 *s_icnt = m_icnt + 8;
     u32 *r = (u32 *)0xa15100;
     u16 *r16 = (u16 *)r;
-    u32 *rl = (u32 *)0;
+    int ok = 1, i;
+
+    write8(r, 0x00); // FM=0
+    mem_barrier();
+    for (i = 0; i < 8; i++)
+        write32(&fbl_icnt[i], 0);
+    mem_barrier();
+    write16(&r16[0x02/2], 0xfffd); // INTM+unused_bits
+    mem_barrier();
+    expect(ok, r16[0x02/2], 1);
+    x32_cmd(CMD_WRITE8, 0x20004001, 2, 0); // unmask cmd
+    x32_cmd(CMD_WRITE8, 0x20004001, 2, 1); // unmask cmd slave
+    burn10(10);
+    write8(r, 0x00); // FM=0 (hangs without)
+    mem_barrier();
+    expect(ok, r16[0x02/2], 0);
+    expect(ok, m_icnt[4], 1);
+    expect(ok, s_icnt[4], 0);
+    write16(&r16[0x02/2], 0xaaaa); // INTS+unused_bits
+    mem_barrier();
+    expect(ok, r16[0x02/2], 2);
+    burn10(10);
+    mem_barrier();
+    expect(ok, r16[0x02/2], 0);
+    write8(r, 0x00); // FM=0
+    mem_barrier();
+    expect(ok, m_icnt[4], 1);
+    expect(ok, s_icnt[4], 1);
+    for (i = 0; i < 8; i++) {
+        if (i == 4)
+            continue;
+        expect(ok, m_icnt[i], 0);
+        expect(ok, s_icnt[i], 0);
+    }
+    return ok;
+}
+
+static int t_32x_reg_w(void)
+{
+    u32 *r32 = (u32 *)0xa15100;
+    u16 *r16 = (u16 *)r32, old;
     int ok = 1;
 
-    expect(ok, r16[0x00/2], 0x83);
-
-    memcpy_(do_32x_disable, x32x_disable,
-            x32x_disable_end - x32x_disable);
-    do_32x_disable();
-
-    expect(ok, r16[0x00/2], 0x82);
-    expect(ok, r16[0x02/2], 0);
-    expect(ok, r16[0x04/2], 0);
-    expect(ok, r16[0x06/2], 1); // RV
-    expect(ok, r[0x14/4], 0);
-    expect(ok, r[0x18/4], 0);
-    expect(ok, r[0x1c/4], 0);
-    expect(ok, rl[0x04/4], 0x000800);
-
-    write16(&r16[0x06/2], 0);   // can just set without ADEN
+    r32[0x08/4] = ~0;
+    r32[0x0c/4] = ~0;
+    r16[0x10/2] = ~0;
     mem_barrier();
-    expect(ok, r16[0x06/2], 0); // RV
+    expect(ok, r32[0x08/4], 0xfffffe);
+    expect(ok, r32[0x0c/4], 0xffffff);
+    expect(ok, r16[0x10/2], 0xfffc);
+    mem_barrier();
+    r32[0x08/4] = r32[0x0c/4] = 0;
+    r16[0x10/2] = 0;
+    old = r16[0x06/2];
+    x32_cmd(CMD_WRITE16, 0x20004006, ~old, 0);
+    expect(ok, r16[0x06/2], old);
+    return ok;
+}
+
+// prepare for reset btn press tests
+static int t_32x_reset_prep(void)
+{
+    u32 *fbl_icnt = (u32 *)(0x840000 + IRQ_CNT_FB_BASE);
+    u32 *r32 = (u32 *)0xa15100;
+    u16 *r16 = (u16 *)r32;
+    u8 *r8 = (u8 *)r32;
+    int ok = 1, i;
+
+    expect(ok, r16[0x00/2], 0x83);
+    write8(r8, 0x00); // FM=0
+    mem_barrier();
+    expect(ok, r8[0x8b] & ~2, 0);
+    for (i = 0; i < 8; i++)
+        write32(&fbl_icnt[i], 0x01000100);
+    x32_cmd(CMD_WRITE8, 0x20004001, 0x02, 0); // unmask cmd
+    x32_cmd(CMD_WRITE8, 0x20004001, 0x02, 1); // unmask slave
+    burn10(10);
+    write8(r8, 0x00); // FM=0
+    mem_barrier();
+    for (i = 0; i < 8; i++)
+        expect(ok, fbl_icnt[i], 0x01000100);
+
+    r16[0x04/2] = 0xffff;
+    r32[0x08/4] = 0x5a5a5a08;
+    r32[0x0c/4] = 0x5a5a5a0c;
+    r16[0x10/2] = 0x5a10;
+    r32[0x20/4] = 0x00005a20; // no x32_cmd
+    r32[0x24/4] = 0x5a5a5a24;
+    r32[0x28/4] = 0x5a5a5a28;
+    r32[0x2c/4] = 0x5a5a5a2c;
     return ok;
 }
 
@@ -1957,6 +2172,9 @@ static const struct {
     int (*test)(void);
     const char *name;
 } g_tests[] = {
+    // this must be first to disable the 32x and restore the 68k vector table
+    { T_32, t_32x_reset_btn,       "32x resetbtn" },
+
     { T_MD, t_dma_zero_wrap,       "dma zero len + wrap" },
     { T_MD, t_dma_zero_fill,       "dma zero len + fill" },
     { T_MD, t_dma_ram_wrap,        "dma ram wrap" },
@@ -2008,11 +2226,14 @@ static const struct {
     // all tests assume RV=1 FM=0
     { T_32, t_32x_init,            "32x init" },
     { T_32, t_32x_echo,            "32x echo" },
+    { T_32, t_32x_sh_defaults,     "32x sh def" },
     { T_32, t_32x_md_bios,         "32x md bios" },
     { T_32, t_32x_md_rom,          "32x md rom" },
     { T_32, t_32x_md_fb,           "32x md fb" },
     { T_32, t_32x_sh_fb,           "32x sh fb" },
-    { T_32, t_32x_disable,         "32x disable" }, // must be last 32x
+    { T_32, t_32x_irq,             "32x irq" },
+    { T_32, t_32x_reg_w,           "32x reg w" },
+    { T_32, t_32x_reset_prep,      "32x rstprep" }, // must be last 32x
 };
 
 static void setup_z80(void)
@@ -2070,6 +2291,8 @@ static unused int hexinc(char *c)
 
 int main()
 {
+    void (*px32x_switch_rv)(short rv);
+    short (*pget_input)(void) = get_input;
     int passed = 0;
     int skipped = 0;
     int have_32x;
@@ -2140,7 +2363,7 @@ int main()
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
 
     have_32x = read32(0xa130ec) == MKLONG('M','A','R','S');
-    en_32x = have_32x && (read32(0xa15100) & 1);
+    en_32x = have_32x && (read16(0xa15100) & 1);
     v8 = read8(0xa10001);
     printf("MD version: %02x %s %s %s%s\n", v8,
         (v8 & 0x80) ? "world" : "jap",
@@ -2162,6 +2385,10 @@ int main()
             continue;
         }
         ret = g_tests[i].test();
+        if (ret == R_SKIP) {
+            skipped++;
+            continue;
+        }
         if (ret != 1) {
             text_pal = 2;
             printf("failed %d: %s\n", i, g_tests[i].name);
@@ -2178,13 +2405,27 @@ int main()
     printf_ypos = 0;
     printf("     ");
 
-    for (i = 0; i < 60*60 && !(get_input() & BTNM_A); i++)
+    if (have_32x) {
+        u8 *p = (u8 *)0xff0040;
+        u32 len = x32x_switch_rv_end - x32x_switch_rv;
+        px32x_switch_rv = (void *)p; p += len;
+        memcpy_(px32x_switch_rv, x32x_switch_rv, len);
+
+        len = get_input_end - get_input_s;
+        pget_input = (void *)p; p += len;
+        memcpy_(pget_input, get_input_s, len);
+
+        // prepare for reset - run from 880xxx as the reset vector points there
+        // todo: broken printf
+        px32x_switch_rv(0);
+    }
+    for (i = 0; i < 60*60 && !(pget_input() & BTNM_A); i++)
         wait_next_vsync();
 #ifndef PICO
     // blank due to my lame tv being burn-in prone
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD);
 #endif
-    while (!(get_input() & BTNM_A))
+    while (!(pget_input() & BTNM_A))
         burn10(488*100/10);
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
 
@@ -2215,18 +2456,18 @@ int main()
                     hexinc(&c[2]);
         }
 #endif
-        while (get_input() & BTNM_A)
+        while (pget_input() & BTNM_A)
             wait_next_vsync();
 
         wait_next_vsync();
         for (;;) {
-            int b = get_input();
+            int b = pget_input();
 
             if (b & BTNM_C) {
                 hscroll = 1, vscroll = -1;
                 do {
                     wait_next_vsync();
-                } while (get_input() & BTNM_C);
+                } while (pget_input() & BTNM_C);
                 cellmode ^= 1;
             }
             if (b & (BTNM_L | BTNM_R | BTNM_C)) {
@@ -2252,13 +2493,13 @@ int main()
                 hsz = (hsz + 1) & 3;
                 do {
                     wait_next_vsync();
-                } while (get_input() & BTNM_A);
+                } while (pget_input() & BTNM_A);
             }
             if (b & BTNM_B) {
                 vsz = (vsz + 1) & 3;
                 do {
                     wait_next_vsync();
-                } while (get_input() & BTNM_B);
+                } while (pget_input() & BTNM_B);
             }
             VDP_setReg(VDP_SCROLLSZ, (vsz << 4) | hsz);
 

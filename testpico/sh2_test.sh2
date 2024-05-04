@@ -100,7 +100,7 @@ xstart:
         mov.b   @r1, r0
         mov_bc  0x01, 0, r1  /* enable */
 .endif
-        mov     #0xd0, r0    /* enable irqs */
+        mov     #0x10, r0    /* enable irqs, 0 causes endless irq */
         ldc     r0, sr
         mov.l   l_main_c, r0
         jmp     @r0
@@ -108,18 +108,38 @@ xstart:
 
 main_irq:
         mov.l   r0, @-r15
+        mov.l   r1, @-r15
+        mov.l   l_irq_cnt, r1  /* counters in fb (0x2401ff00) */
 
-        stc     sr, r0       /* SR holds IRQ level in I3-I0 */
+do_irq_cmn:
+        mov.l   r2, @-r15
+        mov     #0x80, r0
+        mov.b   r0, @(0, gbr) /* FM=1 */
+        mov.b   r0, @(0, gbr) /* flush write buf */
+        stc     sr, r0        /* SR holds IRQ level in I3-I0 */
         shlr2   r0
-        and     #0x38,r0
-        cmp/eq  #0x38,r0
-        bt      main_irq_vres
-! todo
-0:
-        bra     0b
+        shlr2   r0
+        and     #0x0e, r0
+        mov     r0, r2
+        add     r1, r0
+        mov.w   @r0, r1
+        add     #1, r1
+        mov.w   r1, @r0
+        mova    l_irq_ao, r0
+        mov.w   @(r0, r2), r0
+        stc     gbr, r1
+        mov.w   r0, @(r0, r1) /* ack */
+        mov     #0x80, r0
+        mov.b   r0, @(0, gbr) /* FM=1 and flush writebuf (alt: ~20 nops) */
+        mov.l   @r15+, r2
+        mov.l   @r15+, r1
+        mov.l   @r15+, r0
+        rte
         nop
 
-main_irq_vres:
+! not used
+.if 0
+main_irq_vres_:
         mov.w   r0, @(0x14, gbr)  /* ack */
         mov.b   @(7, gbr), r0     /* RV */
         tst     #1, r0
@@ -146,8 +166,10 @@ main_irq_vres:
         nop
 
 main_irq_ret:
-        rte
         mov.l   @r15+, r0
+        rte
+        nop
+.endif
 
 .global _read_frt
 _read_frt:
@@ -160,14 +182,6 @@ _read_frt:
         rts
         or      r1, r0
 
-.align 2
-l_cctl:
-        .long   0xFFFFFE92
-l_frt:
-        .long   0xFFFFFE10
-l_main_c:
-        .long   _main_c
-
 ! dummy
 .global _start
 _start:
@@ -176,9 +190,28 @@ main_err:
         bra     do_exc_master
         mov     #0xff, r0
 slave_err:
-slave_irq:
         bra     do_exc_slave
         mov     #0xff, r0
+
+slave_irq:
+        mov.l   r0, @-r15
+        mov.l   r1, @-r15
+        mov.l   l_irq_cnt, r1  /* counters in fb (0x2401ff00) */
+        bra     do_irq_cmn
+        add     #0x10, r1
+
+.align 2
+l_cctl:
+        .long   0xFFFFFE92
+l_frt:
+        .long   0xFFFFFE10
+l_main_c:
+        .long   _main_c
+l_irq_cnt:
+        .long   0x2401ff00
+l_irq_ao:
+        /*         ?,    ?,    ?,  pwm,  cmd,    h,    v,  rst */
+        .word   0x0e, 0x0e, 0x0e, 0x1c, 0x1a, 0x18, 0x16, 0x14
 
 .macro exc_master num
 master_e\num:

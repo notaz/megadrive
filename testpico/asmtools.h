@@ -30,6 +30,8 @@ void test_ym_stopped_tick(void);
 short test_ym_ab_sync(void);
 short test_ym_ab_sync2(void);
 
+extern const char get_input_s[];
+extern const char get_input_end[];
 extern const char test_hint[];
 extern const char test_hint_end[];
 extern const char test_vint[];
@@ -40,5 +42,7 @@ extern const char x32x_enable[];
 extern const char x32x_enable_end[];
 extern const char x32x_disable[];
 extern const char x32x_disable_end[];
+extern const char x32x_switch_rv[];
+extern const char x32x_switch_rv_end[];
 extern const char test_32x_b_c0[];
 extern const char test_32x_b_c0_end[];

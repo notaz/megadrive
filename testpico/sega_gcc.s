@@ -23,9 +23,12 @@ exc_tab:
     .ascii "src: https://github.com/notaz/megadrive/" /* 1c8 */
     .ascii "JUE             "                         /* 1f0 */
 
+# 32X reset vector (880200)
+    bra     RST32X
+
 # mystery landing area for reset with 32X on and RV=1
 # 2c8 - 304 in multiples of 4
-.rept 0x1c0/2
+.rept 0x1bc/2
     illegal
 .endr
 
@@ -139,6 +142,23 @@ RST:
 #VBL:
 #    rte
 
+RST32X:
+    lea     ram_rv_switch, %a0
+    movea.l #0xff0100, %a1
+    lea     ram_rv_switch_end, %a2
+0:
+    move.l  (%a0)+, (%a1)+
+    cmp.l   %a2, %a0
+    blt.s   0b
+    jmp     (0xff0100).l
+
+ram_rv_switch:
+    move.l  (0x880004).l, %a0
+    bset    #0, (0xa15107).l  /* RV=1 */
+    nop                       /* just in case */
+    jmp     (%a0)
+ram_rv_switch_end:
+
 pre_exception:
     move.w  #0x2700, %sr
     movem.l %d0-%d7/%a0-%a7,-(%sp)
@@ -152,7 +172,7 @@ pre_exception:
 .macro exc_stub num
 exc\num:
     move.w #0x\num, -(%sp)
-    jmp pre_exception
+    bra pre_exception
 .endm
 
 exc_stub 02

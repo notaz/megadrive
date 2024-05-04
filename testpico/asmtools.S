@@ -6,6 +6,7 @@
     move.l (4 + \arg * 4 + \stacksz)(%sp), \reg
 .endm
 
+# args are always 4 bytes in stack, caller restores sp
 .macro ldargw arg, stacksz, reg
     move.w (4 + \arg * 4 + 2 + \stacksz)(%sp), \reg
 .endm
@@ -44,6 +45,8 @@ write16_x16:
 #  destroys d1
 .global get_input
 get_input:
+.global get_input_s
+get_input_s:
 	move.b		#0x40,(0xa10003)
 	moveq.l		#0,d0
 	nop
@@ -66,6 +69,8 @@ get_input:
 	and.w		d0,d1		/* what changed now */
 .endif
 	rts
+.global get_input_end
+get_input_end:
 
 .global get_line
 get_line:
@@ -545,5 +550,24 @@ test_ym_ab_sync2:
     move.b      (a0), d0              /* re-read */
     move.b      #0x3c, (a1)           /* 12 clear, disable  */
     rts
+
+.global x32x_switch_rv
+x32x_switch_rv:
+    ldargw      0, 0, d0
+    move.l      (sp)+, d1
+    movea.l     #0xa15106, a0
+    btst        #0, d0
+    bne         0f
+    move.w      #0, (a0)
+    or.l        #0x880000, d1
+    bra         1f
+0:
+    move.w      #1, (a0)
+    and.l       #0x07ffff, d1
+1:
+    movea.l     d1, a1
+    jmp         (a1)
+.global x32x_switch_rv_end
+x32x_switch_rv_end:
 
 # vim:filetype=asmM68k:ts=4:sw=4:expandtab
