@@ -17,21 +17,21 @@
         .long   master_e11  /* NMI vector */
         .long   master_e12  /* User break vector */
 .rept 19
-        .long   main_err    /* reserved */
+        .long   master_err  /* reserved */
 .endr
 .rept 32
-        .long   main_err    /* TRAPA #32-63 */
+        .long   master_err  /* TRAPA #32-63 */
 .endr
-        .long   main_irq    /* Level 1 IRQ */
-        .long   main_irq    /* Level 2 & 3 IRQ's */
-        .long   main_irq    /* Level 4 & 5 IRQ's */
-        .long   main_irq    /* PWM interupt */
-        .long   main_irq    /* Command interupt */
-        .long   main_irq    /* H Blank interupt */
-        .long   main_irq    /* V Blank interupt */
-        .long   main_irq    /* Reset Button */
+        .long   master_irq0 /* Level 1 IRQ */
+        .long   master_irq1 /* Level 2 & 3 IRQ's */
+        .long   master_irq2 /* Level 4 & 5 IRQ's */
+        .long   master_irq3 /* PWM interupt */
+        .long   master_irq4 /* Command interupt */
+        .long   master_irq5 /* H Blank interupt */
+        .long   master_irq6 /* V Blank interupt */
+        .long   master_irq7 /* Reset Button */
 .rept 56
-        .long   main_err    /* peripherals */
+        .long   master_err  /* peripherals */
 .endr
 
 ! Slave Vector Base Table at 0x06000200
@@ -55,14 +55,14 @@
 .rept 32
         .long   slave_err   /* TRAPA #32-63 */
 .endr
-        .long   slave_irq   /* Level 1 IRQ */
-        .long   slave_irq   /* Level 2 & 3 IRQ's */
-        .long   slave_irq   /* Level 4 & 5 IRQ's */
-        .long   slave_irq   /* PWM interupt */
-        .long   slave_irq   /* Command interupt */
-        .long   slave_irq   /* H Blank interupt */
-        .long   slave_irq   /* V Blank interupt */
-        .long   slave_irq   /* Reset Button */
+        .long   slave_irq0  /* Level 1 IRQ */
+        .long   slave_irq1  /* Level 2 & 3 IRQ's */
+        .long   slave_irq2  /* Level 4 & 5 IRQ's */
+        .long   slave_irq3  /* PWM interupt */
+        .long   slave_irq4  /* Command interupt */
+        .long   slave_irq5  /* H Blank interupt */
+        .long   slave_irq6  /* V Blank interupt */
+        .long   slave_irq7  /* Reset Button */
 .rept 56
         .long   slave_err   /* peripherals */
 .endr
@@ -106,8 +106,9 @@ xstart:
         jmp     @r0
         nop
 
-main_irq:
-        mov.l   r0, @-r15
+! r0=vector_number
+do_irq_master:
+        mov.b   r0, @(0x2c, gbr)
         mov.l   r1, @-r15
         mov.l   l_irq_cnt, r1  /* counters in fb (0x2401ff00) */
 
@@ -186,15 +187,16 @@ _read_frt:
 .global _start
 _start:
 
-main_err:
+master_err:
         bra     do_exc_master
         mov     #0xff, r0
 slave_err:
         bra     do_exc_slave
         mov     #0xff, r0
 
-slave_irq:
-        mov.l   r0, @-r15
+! r0=vector_number
+do_irq_slave:
+        mov.b   r0, @(0x2d, gbr)
         mov.l   r1, @-r15
         mov.l   l_irq_cnt, r1  /* counters in fb (0x2401ff00) */
         bra     do_irq_cmn
@@ -225,6 +227,20 @@ slave_e\num:
         mov     #\num, r0
 .endm
 
+.macro irq_master num
+master_irq\num:
+        mov.l   r0, @-r15
+        bra     do_irq_master
+        mov     #\num, r0
+.endm
+
+.macro irq_slave num
+slave_irq\num:
+        mov.l   r0, @-r15
+        bra     do_irq_slave
+        mov     #\num, r0
+.endm
+
 exc_master 4
 exc_master 5
 exc_master 6
@@ -234,6 +250,14 @@ exc_master 9
 exc_master 10
 exc_master 11
 exc_master 12
+irq_master 0
+irq_master 1
+irq_master 2
+irq_master 3
+irq_master 4
+irq_master 5
+irq_master 6
+irq_master 7
 
 exc_slave 4
 exc_slave 5
@@ -244,15 +268,23 @@ exc_slave 9
 exc_slave 10
 exc_slave 11
 exc_slave 12
+irq_slave 0
+irq_slave 1
+irq_slave 2
+irq_slave 3
+irq_slave 4
+irq_slave 5
+irq_slave 6
+irq_slave 7
 
 do_exc_master:
-        mov.w   r0, @(0x2c, gbr)
+        mov.b   r0, @(0x2e, gbr)
 0:
         bra     0b
         nop
 
 do_exc_slave:
-        mov.w   r0, @(0x2e, gbr)
+        mov.b   r0, @(0x2f, gbr)
 0:
         bra     0b
         nop

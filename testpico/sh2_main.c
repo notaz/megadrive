@@ -3,6 +3,15 @@
 void spin(int loops);
 u16  read_frt(void);
 
+// comm area map:
+// 00-01: cmd
+// 02-03: error
+// 04-07: arg0/response
+// 08-0b: arg1
+// 0c: last_irq_vec_master
+// 0d: last_irq_vec_slave
+// 0e: exception_index_master
+// 0f: exception_index_slave
 static void do_cmd(u16 cmd, u16 r[6], u32 is_slave)
 {
     u32 *rl = (u32 *)r;

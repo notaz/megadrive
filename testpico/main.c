@@ -1759,9 +1759,11 @@ static int t_irq_f_flag_h32(void)
 
 #define IRQ_CNT_FB_BASE 0x1ff00
 
+// see do_cmd()
 static void x32_cmd(enum x32x_cmd cmd, u32 a0, u32 a1, u16 is_slave)
 {
     u16 v, *r = (u16 *)0xa15120;
+    u8 *r8 = (u8 *)r;
     u16 cmd_s = cmd | (is_slave << 15);
     int i;
 
@@ -1775,7 +1777,7 @@ static void x32_cmd(enum x32x_cmd cmd, u32 a0, u32 a1, u16 is_slave)
     if (v != 0) {
         printf("cmd clr: %x\n", v);
         mem_barrier();
-        printf("c, e: %02x %02x\n", r[0x0c/2],  r[0x0e/2]);
+        printf("exc m s: %02x %02x\n", r8[0x0e], r8[0x0f]);
         write16(r, 0);
     }
     v = read16(&r[1]);
@@ -1817,7 +1819,7 @@ static int t_32x_reset_btn(void)
     expect(ok, r32[0x20/4], 0x00005a20);
     expect(ok, r32[0x24/4], 0x5a5a5a24);
     expect(ok, r32[0x28/4], 0x5a5a5a28);
-    expect(ok, r32[0x2c/4], 0x5a5a5a2c);
+    expect(ok, r32[0x2c/4], 0x07075a2c); // 7 - last_irq_vec
     if (!(r16[0x00/2] & 0x8000)) {
         expect(ok, r8 [0x81], 0);
         expect(ok, r16[0x82/2], 0);
@@ -1941,13 +1943,16 @@ static int t_32x_init(void)
 
 static int t_32x_echo(void)
 {
-    u16 *r = (u16 *)0xa15120;
+    u16 *r16 = (u16 *)0xa15100;
     int ok = 1;
 
+    r16[0x2c/2] = r16[0x2e/2] = 0;
     x32_cmd(CMD_ECHO, 0x12340000, 0, 0);
-    expect_sh2(ok, 0, r[0x06/2], 0x1234);
+    expect_sh2(ok, 0, r16[0x26/2], 0x1234);
     x32_cmd(CMD_ECHO, 0x23450000, 0, 1);
-    expect_sh2(ok, 1, r[0x06/2], 0xa345);
+    expect_sh2(ok, 1, r16[0x26/2], 0xa345);
+    expect(ok, r16[0x2c/2], 0); // no last_irq_vec
+    expect(ok, r16[0x2e/2], 0); // no exception_index
     return ok;
 }
 
@@ -2069,9 +2074,11 @@ static int t_32x_irq(void)
     u16 *s_icnt = m_icnt + 8;
     u32 *r = (u32 *)0xa15100;
     u16 *r16 = (u16 *)r;
+    u8 *r8 = (u8 *)r;
     int ok = 1, i;
 
     write8(r, 0x00); // FM=0
+    r[0x2c/4] = 0;
     mem_barrier();
     for (i = 0; i < 8; i++)
         write32(&fbl_icnt[i], 0);
@@ -2085,6 +2092,9 @@ static int t_32x_irq(void)
     write8(r, 0x00); // FM=0 (hangs without)
     mem_barrier();
     expect(ok, r16[0x02/2], 0);
+    expect(ok, r8 [0x2c], 4);
+    expect(ok, r8 [0x2d], 0);
+    expect(ok, r16[0x2e/2], 0); // no exception_index
     expect(ok, m_icnt[4], 1);
     expect(ok, s_icnt[4], 0);
     write16(&r16[0x02/2], 0xaaaa); // INTS+unused_bits
@@ -2093,6 +2103,9 @@ static int t_32x_irq(void)
     burn10(10);
     mem_barrier();
     expect(ok, r16[0x02/2], 0);
+    expect(ok, r8 [0x2c], 4);
+    expect(ok, r8 [0x2d], 4);
+    expect(ok, r16[0x2e/2], 0); // no exception_index
     write8(r, 0x00); // FM=0
     mem_barrier();
     expect(ok, m_icnt[4], 1);
@@ -2139,6 +2152,7 @@ static int t_32x_reset_prep(void)
 
     expect(ok, r16[0x00/2], 0x83);
     write8(r8, 0x00); // FM=0
+    r32[0x2c/4] = 0;
     mem_barrier();
     expect(ok, r8[0x8b] & ~2, 0);
     for (i = 0; i < 8; i++)
@@ -2147,6 +2161,7 @@ static int t_32x_reset_prep(void)
     x32_cmd(CMD_WRITE8, 0x20004001, 0x02, 1); // unmask slave
     burn10(10);
     write8(r8, 0x00); // FM=0
+    expect(ok, r32[0x2c/4], 0);
     mem_barrier();
     for (i = 0; i < 8; i++)
         expect(ok, fbl_icnt[i], 0x01000100);
