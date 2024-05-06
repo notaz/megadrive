@@ -300,6 +300,7 @@ x32x_enable_end:
 .global x32x_disable
 x32x_disable:
     movea.l     #0xa15100, a0
+    move.w      #0, 6(a0)         /* RV=0 */
     move.w      #1, (a0)          /* ADEN (reset sh2) */
     move.w      #0, (a0)          /* adapter disable, reset sh2 */
     move.w      #1, d0

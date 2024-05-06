@@ -1855,7 +1855,7 @@ static int t_32x_reset_btn(void)
     expect(ok, r16[0x00/2], 0x82);
     expect(ok, r16[0x02/2], 0);
     expect(ok, r16[0x04/2], 3);
-    expect(ok, r16[0x06/2], 1); // RV
+    expect(ok, r16[0x06/2], 0); // RV cleared by x32x_disable
     expect(ok, r32[0x08/4], 0x5a5a08);
     expect(ok, r32[0x0c/4], 0x5a5a0c);
     expect(ok, r16[0x10/2], 0x5a10);
@@ -1863,7 +1863,6 @@ static int t_32x_reset_btn(void)
 
     // setup for t_32x_init, t_32x_sh_defaults
     r16[0x04/2] = 0;
-    r16[0x06/2] = 0;      // can just set without ADEN
     r16[0x10/2] = 0x1234; // warm reset indicator
     mem_barrier();
     expect(ok, r16[0x06/2], 0); // RV
@@ -1907,9 +1906,40 @@ static int t_32x_init(void)
     r32[0x28/4] = 0;
     r32[0x2c/4] = 0;
 
-    // these have garbage or old values (survive MD's power cycle)
+    // check writable bits without ADEN
+    // 08,0c have garbage or old values (survive MD's power cycle)
+    write16(&r16[0x00/2], 0);
+    mem_barrier();
+    expect(ok, r16[0x00/2], 0x80);
+    write16(&r16[0x00/2], 0xfffe);
+    mem_barrier();
+    expect(ok, r16[0x00/2], 0x8082);
+    r16[0x00/2] = 0x82;
+    r16[0x02/2] = 0xffff;
+    r32[0x04/4] = 0xffffffff;
+    r32[0x08/4] = 0xffffffff;
+    r32[0x0c/4] = 0xffffffff;
+    r16[0x10/2] = 0xffff;
+    r32[0x14/4] = 0xffffffff;
+    r32[0x18/4] = 0xffffffff;
+    r32[0x1c/4] = 0xffffffff;
+    mem_barrier();
+    expect(ok, r16[0x00/2], 0x82);
+    expect(ok, r16[0x02/2], 0x03);
+    expect(ok, r16[0x04/2], 0x03);
+    expect(ok, r16[0x06/2], 0x07);
+    expect(ok, r32[0x08/4], 0x00fffffe);
+    expect(ok, r32[0x0c/4], 0x00ffffff);
+    expect(ok, r16[0x10/2], 0xfffc);
+    expect(ok, r32[0x14/4], 0);
+    expect(ok, r16[0x18/2], 0);
+    expect(ok, r16[0x1a/2], 0x0101);
+    expect(ok, r32[0x1c/4], 0);
+    r16[0x02/2] = 0;
+    r32[0x04/4] = 0;
     r32[0x08/4] = 0;
     r32[0x0c/4] = 0;
+    r16[0x1a/2] = 0;
 
     // could just set RV, but BIOS reads ROM, so can't
     memcpy_(do_32x_enable, x32x_enable,
