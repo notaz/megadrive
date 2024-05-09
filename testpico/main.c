@@ -346,10 +346,11 @@ void exception(const struct exc_frame *f)
         printf("  PC: %08x SR: %04x            \n", f->g.pc, f->g.sr);
         sp_add = 6;
     }
-    for (i = 0; i < 8; i++)
-        printf("  D%d: %08x A%d: %08x    \n", i, f->dr[i], i, f->ar[i]);
-    printf("                               \n");
     sp = (u32 *)(f->ar[7] + sp_add);
+    for (i = 0; i < 7; i++)
+        printf("  D%d: %08x A%d: %08x    \n", i, f->dr[i], i, f->ar[i]);
+    printf("  D%d: %08x SP: %08x    \n", i, f->dr[i], (u32)sp);
+    printf("                               \n");
     printf(" %08x %08x %08x %08x\n", sp[0], sp[1], sp[2], sp[3]);
     printf(" %08x %08x %08x %08x\n", sp[4], sp[5], sp[6], sp[7]);
 }
@@ -402,6 +403,14 @@ static void vdp_wait_for_line_0(void)
         /* blanking */;
     while (read8(VDP_HV_COUNTER) != 0)
         ;
+}
+
+static void wait_next_vsync(void)
+{
+    while (read16(VDP_CTRL_PORT) & SR_VB)
+        /* blanking */;
+    while (!(read16(VDP_CTRL_PORT) & SR_VB))
+        /* not blanking */;
 }
 
 static void t_dma_zero_wrap_early(void)
@@ -1821,14 +1830,17 @@ static int t_32x_reset_btn(void)
     expect(ok, r32[0x28/4], 0x5a5a5a28);
     expect(ok, r32[0x2c/4], 0x07075a2c); // 7 - last_irq_vec
     if (!(r16[0x00/2] & 0x8000)) {
-        expect(ok, r8 [0x81], 0);
-        expect(ok, r16[0x82/2], 0);
-        expect(ok, r16[0x84/2], 0);
-        expect(ok, r16[0x86/2], 0);
-        //expect(ok, r16[0x88/2], 0); // triggers fill?
+        expect(ok, r8 [0x81], 1);
+        expect(ok, r16[0x82/2], 1);
+        expect(ok, r16[0x84/2], 0xff);
+        expect(ok, r16[0x86/2], 0xffff);
+        expect(ok, r16[0x88/2], 0);
         expect(ok, r8 [0x8b] & ~2, 0); // FEN toggles periodically?
         expect(ok, r16[0x8c/2], 0);
         expect(ok, r16[0x8e/2], 0);
+        // setup vdp for t_32x_init
+        r8 [0x81] = 0;
+        r16[0x82/2] = r16[0x84/2] = r16[0x86/2] = 0;
     }
     r32[0x20/4] = r32[0x24/4] = r32[0x28/4] = r32[0x2c/4] = 0;
     for (s = 0; s < 2; s++)
@@ -2174,7 +2186,8 @@ static int t_32x_reg_w(void)
 // prepare for reset btn press tests
 static int t_32x_reset_prep(void)
 {
-    u32 *fbl_icnt = (u32 *)(0x840000 + IRQ_CNT_FB_BASE);
+    u32 *fbl = (u32 *)0x840000;
+    u32 *fbl_icnt = fbl + IRQ_CNT_FB_BASE / 4;
     u32 *r32 = (u32 *)0xa15100;
     u16 *r16 = (u16 *)r32;
     u8 *r8 = (u8 *)r32;
@@ -2204,6 +2217,21 @@ static int t_32x_reset_prep(void)
     r32[0x24/4] = 0x5a5a5a24;
     r32[0x28/4] = 0x5a5a5a28;
     r32[0x2c/4] = 0x5a5a5a2c;
+    if (!(r16[0x00/2] & 0x8000)) {
+        wait_next_vsync();
+        r16[0x8a/2] = 0x0001;
+        mem_barrier();
+        for (i = 0; i < 220/2; i++)
+            fbl[i] = 0;
+        r8 [0x81] = 1;
+        r16[0x82/2] = 0xffff;
+        r16[0x84/2] = 0xffff;
+        r16[0x86/2] = 0xffff;
+        r16[0x8a/2] = 0x0000;
+        r16[0x8c/2] = 0xffff;
+        r16[0x8e/2] = 0xffff;
+        r16[0x100/2] = 0;
+    }
     return ok;
 }
 
@@ -2314,14 +2342,6 @@ static void setup_z80(void)
         ;
 }
 
-static void wait_next_vsync(void)
-{
-    while (read16(VDP_CTRL_PORT) & SR_VB)
-        /* blanking */;
-    while (!(read16(VDP_CTRL_PORT) & SR_VB))
-        /* not blanking */;
-}
-
 static unused int hexinc(char *c)
 {
     (*c)++;
@@ -2415,6 +2435,12 @@ int main()
         (v8 & 0x40) ? "pal" : "ntsc",
         have_32x ? "32X" : "",
         en_32x ? "+" : "");
+    printf("reset hvc %04x->%04x\n", read16(-4), read16(-2));
+
+    // sanity check
+    extern u32 sh2_test[];
+    if (sh2_test[0] != read32(0x3e0) || sh2_test[0x200/4] != read32(0x3e4))
+        printf("bad 0x3c0 tab\n");
 
     for (i = 0; i < ARRAY_SIZE(g_tests); i++) {
         // print test number if we haven't scrolled away
@@ -2450,7 +2476,7 @@ int main()
     printf_ypos = 0;
     printf("     ");
 
-    if (have_32x) {
+    if (have_32x && (read16(0xa15100) & 1)) {
         u8 *p = (u8 *)0xff0040;
         u32 len = x32x_switch_rv_end - x32x_switch_rv;
         px32x_switch_rv = (void *)p; p += len;
@@ -2464,14 +2490,18 @@ int main()
         // todo: broken printf
         px32x_switch_rv(0);
     }
-    for (i = 0; i < 60*60 && !(pget_input() & BTNM_A); i++)
-        wait_next_vsync();
+    for (i = 0; i < 60*60 && !(pget_input() & BTNM_A); i++) {
+        while (read16(VDP_CTRL_PORT) & SR_VB)
+            write16(-4, read16(VDP_HV_COUNTER)); /* blanking */
+        while (!(read16(VDP_CTRL_PORT) & SR_VB))
+            write16(-4, read16(VDP_HV_COUNTER)); /* not blanking */;
+    }
 #ifndef PICO
     // blank due to my lame tv being burn-in prone
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD);
 #endif
     while (!(pget_input() & BTNM_A))
-        burn10(488*100/10);
+        write16(-4, read16(VDP_HV_COUNTER));
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
 
 

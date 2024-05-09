@@ -112,20 +112,22 @@ exc_tab:
     .word 0x5100,0x3340,0x0006,0x303C,0x8000,0x6004,0x44FC,0x0001
 
 RST:
+    andi.b  #0x0F, (0xA10001)       /* 24 */
+    bne.s   0f                      /* 10 */
+    move.w  #0x8104, (0xc00004)
+    bra     1f
+0:
+    move.l  #0x53454741, (0xA14000) /* 28 'SEGA' */
+1:
+    move.w  (0xc00008), %d0         /* 16 */
+    move.w  %d0, -(%sp)
+    subq.l  #2, %sp
+    move    %sp, %usp
+
     move.w  #0x2600, %sr
 
-    move.b (0xA10001), %d0
-    andi.b #0x0F, %d0
-    beq.s 0f
-    move.l  #0x53454741, (0xA14000) /* 'SEGA' */
-0:
-    tst.w   (0xc00004).l
-
-    moveq   #0, %d0
-    movea.l %d0, %a7
-    move    %a7, %usp
-
     /* clear .bss */
+    moveq.l #0, %d0
     lea     __bss_start, %a0
     lea     __end, %a1
 0:
@@ -162,9 +164,9 @@ ram_rv_switch_end:
 pre_exception:
     move.w  #0x2700, %sr
     movem.l %d0-%d7/%a0-%a7,-(%sp)
-    add.w   #2, 0x3e(%sp)
+    add.w   #2, 0x3e(%sp)   /* ecxnum */
     move.l  %sp, %d0
-    move.l  %d0,-(%sp)  /* arg0 */
+    move.l  %d0,-(%sp)      /* arg0 */
     jsr     exception
 0:
     bra     0b

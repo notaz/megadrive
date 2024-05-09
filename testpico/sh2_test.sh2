@@ -29,6 +29,7 @@
         .long   master_irq4 /* Command interupt */
         .long   master_irq5 /* H Blank interupt */
         .long   master_irq6 /* V Blank interupt */
+!        .long   main_irq_vres
         .long   master_irq7 /* Reset Button */
 .rept 56
         .long   master_err  /* peripherals */
@@ -112,6 +113,9 @@ do_irq_master:
         mov.l   r1, @-r15
         mov.l   l_irq_cnt, r1  /* counters in fb (0x2401ff00) */
 
+! According to "32X Technical Information Attachment 1" FTOA pin must be toggled
+! or interrupts may be missed when multiple irqs trigger. We skip that here since
+! we test only 1 irq at a time.
 do_irq_cmn:
         mov.l   r2, @-r15
         mov     #0x80, r0
@@ -140,7 +144,7 @@ do_irq_cmn:
 
 ! not used
 .if 0
-main_irq_vres_:
+main_irq_vres:
         mov.w   r0, @(0x14, gbr)  /* ack */
         mov.b   @(7, gbr), r0     /* RV */
         tst     #1, r0
@@ -159,7 +163,7 @@ main_irq_vres_:
         mov.b   r0, @(5, r1) /* OCRB L */
         mov.b   r0, @(2, r1) /* FRC H */
         mov.b   r0, @(3, r1) /* FRC L */
-        mov.b   @(7, r1), r0
+        mov.b   @(3, r1), r0
 ! sleep - docs say not to use
 !        sleep
 0:
