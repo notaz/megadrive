@@ -1828,7 +1828,7 @@ static int t_32x_reset_btn(void)
     expect(ok, r32[0x20/4], 0x00005a20);
     expect(ok, r32[0x24/4], 0x5a5a5a24);
     expect(ok, r32[0x28/4], 0x5a5a5a28);
-    expect(ok, r32[0x2c/4], 0x07075a2c); // 7 - last_irq_vec
+    expect(ok, r32[0x2c/4], 0x075a5a2c); // 7 - last_irq_vec
     if (!(r16[0x00/2] & 0x8000)) {
         expect(ok, r8 [0x81], 1);
         expect(ok, r16[0x82/2], 1);
@@ -1858,7 +1858,18 @@ static int t_32x_reset_btn(void)
         expect(ok, s_icnt[i], 0x100);
     }
     expect(ok, m_icnt[7], 0x101); // VRES happened
+    expect(ok, s_icnt[7], 0x100); // masked on slave
+
+    x32_cmd(CMD_GETSR, 0, 0, 1);
+    expect_sh2(ok, 1, r32[0x24/4] & ~1, 0xf0); // still masked
+    x32_cmd(CMD_SETSR, 0x10, 0, 1);
+    expect(ok, r16[0x00/2], 0x8083);
+    write8(r8, 0x00); // FM=0
+    mem_barrier();
+    expect(ok, m_icnt[7], 0x101);
     expect(ok, s_icnt[7], 0x101);
+    expect(ok, r32[0x2c/4], 0x00070000); // 7 - last_irq_vec
+    r32[0x2c/4] = 0;
 
     memcpy_(do_32x_disable, x32x_disable,
             x32x_disable_end - x32x_disable);
@@ -2202,6 +2213,7 @@ static int t_32x_reset_prep(void)
         write32(&fbl_icnt[i], 0x01000100);
     x32_cmd(CMD_WRITE8, 0x20004001, 0x02, 0); // unmask cmd
     x32_cmd(CMD_WRITE8, 0x20004001, 0x02, 1); // unmask slave
+    x32_cmd(CMD_SETSR, 0xf0, 0, 1);           // mask slave irqs (on the cpu)
     burn10(10);
     write8(r8, 0x00); // FM=0
     expect(ok, r32[0x2c/4], 0);

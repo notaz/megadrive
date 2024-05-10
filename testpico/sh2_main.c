@@ -59,12 +59,20 @@ static void do_cmd(u16 cmd, u16 r[6], u32 is_slave)
         write32(a, d);
         break;
     case CMD_GETGBR:
-        asm("stc gbr, %0" : "=r"(d));
+        asm volatile("stc gbr, %0" : "=r"(d));
         write32(&rl[4/4], d);
         break;
     case CMD_GETVBR:
-        asm("stc vbr, %0" : "=r"(d));
+        asm volatile("stc vbr, %0" : "=r"(d));
         write32(&rl[4/4], d);
+        break;
+    case CMD_GETSR:
+        asm volatile("stc sr, %0" : "=r"(d));
+        write32(&rl[4/4], d);
+        break;
+    case CMD_SETSR:
+        d = read32(&rl[4/4]);
+        asm volatile("ldc %0, sr" :: "r"(d));
         break;
     default:
         r[2/2]++; // error

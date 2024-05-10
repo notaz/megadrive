@@ -37,6 +37,8 @@ enum x32x_cmd {
     CMD_WRITE32 = 8,
     CMD_GETGBR = 9,
     CMD_GETVBR = 10,
+    CMD_GETSR = 11,
+    CMD_SETSR = 12,
 };
 
 // vim:ts=4:sw=4:expandtab
