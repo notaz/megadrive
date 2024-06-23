@@ -810,6 +810,33 @@ static int t_dma_fill_src(void)
     return ok;
 }
 
+// should not see the busy flag
+static int t_dma_busy_vram(void)
+{
+    const u32 *src = (const u32 *)0x3c0000;
+    u16 sr[3];
+    int ok = 1;
+
+    vdp_wait_for_line_0();
+
+    do_setup_dma(src, 1);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100) | CTL_WRITE_DMA);
+    sr[0] = read16(VDP_CTRL_PORT);
+
+    do_setup_dma(src, 4);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100) | CTL_WRITE_DMA);
+    sr[1] = read16(VDP_CTRL_PORT);
+
+    VDP_setReg(VDP_DMA_LEN0, 8);
+    write32(VDP_CTRL_PORT, CTL_WRITE_VRAM(0x100) | CTL_WRITE_DMA);
+    sr[2] = read16(VDP_CTRL_PORT);
+
+    expect_bits(ok, sr[0], 0, SR_DMA);
+    expect_bits(ok, sr[1], 0, SR_DMA);
+    expect_bits(ok, sr[2], 0, SR_DMA);
+    return ok;
+}
+
 // (((a & 2) >> 1) ^ 1) | ((a & $400) >> 9) | (a & $3FC) | ((a & $1F800) >> 1)
 static int t_dma_128k(void)
 {
@@ -2273,6 +2300,7 @@ static const struct {
     { T_MD, t_dma_fill3_vsram,     "dma fill3 vsram" },
     { T_MD, t_dma_fill_dis,        "dma fill disabled" },
     { T_MD, t_dma_fill_src,        "dma fill src incr" },
+    { T_MD, t_dma_busy_vram,       "dma no busy" },
     { T_MD, t_dma_128k,            "dma 128k mode" },
     { T_MD, t_vdp_128k_b16,        "vdp 128k addr bit16" },
     // { t_vdp_128k_b16_inc,    "vdp 128k bit16 inc" }, // mystery
