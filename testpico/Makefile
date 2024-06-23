@@ -16,6 +16,10 @@ CFLAGS += -Wall -g -O2 -m68000 -fomit-frame-pointer
 LDLIBS_LIBGCC := $(shell $(CC) -print-file-name=libgcc.a)
 LDLIBS += $(LDLIBS_LIBGCC)
 
+ifeq ($(shell m68k-elf-gcc -dD -E -c - --param=min-pagesize=0 < /dev/null > /dev/null 2>&1 && echo ok),ok)
+CFLAGS += --param=min-pagesize=0
+endif
+
 SUFFIX := $(shell git describe --always --dirty)
 ifdef PICO
 CFLAGS += -DPICO

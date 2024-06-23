@@ -2234,7 +2234,7 @@ static int t_32x_reset_prep(void)
         r16[0x8a/2] = 0x0001;
         mem_barrier();
         for (i = 0; i < 220/2; i++)
-            fbl[i] = 0;
+            write32(&fbl[i], 0);
         r8 [0x81] = 1;
         r16[0x82/2] = 0xffff;
         r16[0x84/2] = 0xffff;
