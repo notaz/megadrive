@@ -25,6 +25,8 @@ ifdef PICO
 CFLAGS += -DPICO
 SUFFIX := $(SUFFIX)-for-pd
 endif
+CFLAGS += -DVERSION=\"$(SUFFIX)\"
+
 TARGET_BASE = testpico
 TARGET = $(TARGET_BASE)-$(SUFFIX)
 OBJS = sega_gcc.o main.o asmtools.o

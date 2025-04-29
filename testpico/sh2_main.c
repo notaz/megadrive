@@ -3,9 +3,14 @@
 void spin(int loops);
 u16  read_frt(void);
 
+// vram map:
+// 00-0f: master irq counters (16bit)
+// 10-1f: slave ...
+
 // comm area map:
 // 00-01: cmd
-// 02-03: error
+// 02:    error counter
+// 03:    handler input: no 32x irqsrc clear flag for both (if val == 0x5a)
 // 04-07: arg0/response
 // 08-0b: arg1
 // 0c: last_irq_vec_master
@@ -15,6 +20,7 @@ u16  read_frt(void);
 static void do_cmd(u16 cmd, u16 r[6], u32 is_slave)
 {
     u32 *rl = (u32 *)r;
+    u8 *r8 = (u8 *)r;
     u32 a, d;
     u16 v;
 
@@ -75,7 +81,7 @@ static void do_cmd(u16 cmd, u16 r[6], u32 is_slave)
         asm volatile("ldc %0, sr" :: "r"(d));
         break;
     default:
-        r[2/2]++; // error
+        r8[2]++; // error
         mem_barrier();
         break;
     }

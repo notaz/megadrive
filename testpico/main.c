@@ -8,6 +8,10 @@
 #include "asmtools.h"
 //#pragma GCC diagnostic ignored "-Wunused-function"
 
+#ifndef VERSION
+#define VERSION "unknown build"
+#endif
+
 #define VDP_DATA_PORT    0xC00000
 #define VDP_CTRL_PORT    0xC00004
 #define VDP_HV_COUNTER   0xC00008
@@ -385,12 +389,16 @@ static void vdp_wait_for_fifo_empty(void)
 {
     while (!(read16(VDP_CTRL_PORT) & 0x200))
         /* fifo not empty */;
+
+    mem_barrier();
 }
 
 static void vdp_wait_for_dma_idle(void)
 {
     while (read16(VDP_CTRL_PORT) & 2)
         /* dma busy */;
+
+    mem_barrier();
 }
 
 static void vdp_wait_for_line_0(void)
@@ -403,6 +411,8 @@ static void vdp_wait_for_line_0(void)
         /* blanking */;
     while (read8(VDP_HV_COUNTER) != 0)
         ;
+
+    mem_barrier();
 }
 
 static void wait_next_vsync(void)
@@ -411,6 +421,8 @@ static void wait_next_vsync(void)
         /* blanking */;
     while (!(read16(VDP_CTRL_PORT) & SR_VB))
         /* not blanking */;
+
+    mem_barrier();
 }
 
 static void t_dma_zero_wrap_early(void)
@@ -454,13 +466,13 @@ static void t_dma_zero_fill_early(void)
 
 #define expect(ok_, v0_, v1_) \
 do { if ((v0_) != (v1_)) { \
-    printf("%s: %08x %08x\n", #v0_, v0_, v1_); \
+    printf("%d %s: %08x %08x\n", __LINE__, #v0_, v0_, v1_); \
     ok_ = 0; \
 }} while (0)
 
 #define expect_sh2(ok_, sh2_, v0_, v1_) \
 do { if ((v0_) != (v1_)) { \
-    printf("%csh2: %08x %08x\n", sh2_ ? 's' : 'm', v0_, v1_); \
+    printf("%d %csh2: %08x %08x\n", __LINE__, sh2_ ? 's' : 'm', v0_, v1_); \
     ok_ = 0; \
 }} while (0)
 
@@ -1816,11 +1828,12 @@ static void x32_cmd(enum x32x_cmd cmd, u32 a0, u32 a1, u16 is_slave)
         printf("exc m s: %02x %02x\n", r8[0x0e], r8[0x0f]);
         write16(r, 0);
     }
-    v = read16(&r[1]);
+    v = read8(&r8[2]);
     if (v != 0) {
         printf("cmd err: %x\n", v);
         write16(&r[1], 0);
     }
+    mem_barrier();
 }
 
 static int t_32x_reset_btn(void)
@@ -2147,7 +2160,7 @@ static int t_32x_sh_fb(void)
     return ok;
 }
 
-static int t_32x_irq(void)
+static int t_32x_irq_cmd(void)
 {
     u32 *fbl_icnt = (u32 *)(0x840000 + IRQ_CNT_FB_BASE);
     u16 *m_icnt = (u16 *)fbl_icnt;
@@ -2180,7 +2193,9 @@ static int t_32x_irq(void)
     write16(&r16[0x02/2], 0xaaaa); // INTS+unused_bits
     mem_barrier();
     expect(ok, r16[0x02/2], 2);
-    burn10(10);
+    //burn10(10);
+    x32_cmd(CMD_WRITE8, 0x20004001, 0, 0); // mask again
+    x32_cmd(CMD_WRITE8, 0x20004001, 0, 1);
     mem_barrier();
     expect(ok, r16[0x02/2], 0);
     expect(ok, r8 [0x2c], 4);
@@ -2192,6 +2207,102 @@ static int t_32x_irq(void)
     expect(ok, s_icnt[4], 1);
     for (i = 0; i < 8; i++) {
         if (i == 4)
+            continue;
+        expect(ok, m_icnt[i], 0);
+        expect(ok, s_icnt[i], 0);
+    }
+    return ok;
+}
+
+static int t_32x_irq_vint(void)
+{
+    u32 *fbl_icnt = (u32 *)(0x840000 + IRQ_CNT_FB_BASE);
+    u16 *m_icnt = (u16 *)fbl_icnt;
+    u16 *s_icnt = m_icnt + 8;
+    u32 *r = (u32 *)0xa15100;
+    u16 *r16 = (u16 *)r;
+    u8 *r8 = (u8 *)r;
+    int ok = 1, i;
+
+    vdp_wait_for_line_0();
+    write8(r, 0x00); // FM=0
+    r[0x2c/4] = 0;
+    mem_barrier();
+    for (i = 0; i < 8; i++)
+        write32(&fbl_icnt[i], 0);
+    mem_barrier();
+    x32_cmd(CMD_SETSR, 0xf0, 0, 0); // master mask at sr
+    x32_cmd(CMD_WRITE8, 0x20004001, 8, 0); // unmask both 32x vint
+    x32_cmd(CMD_WRITE8, 0x20004001, 8, 1);
+    burn10(10);
+    mem_barrier();
+    expect(ok, r16[0x2c/2], 0); // no pending vints
+    expect(ok, r16[0x2e/2], 0); // no exception_index
+
+    write8(&r8[0x23], 0x5a);    // no-32x-source-autoclear flag
+    wait_next_vsync();
+    burn10(10);
+    expect(ok, r8 [0x2c], 0);
+    expect(ok, r8 [0x2d], 12/2);
+    write8(&r8[0x2d], 0);
+    burn10(10);
+    expect(ok, r8 [0x2c], 0);
+    expect(ok, r8 [0x2d], 12/2);
+
+    x32_cmd(CMD_WRITE16, 0x20004016, 0, 0); // clear on 32x (from master)
+    burn10(10);
+    write16(&r[0x2c/4], 0);
+    burn10(10);
+    expect(ok, r8 [0x2c], 0);
+    expect(ok, r8 [0x2d], 12/2);
+    // (here the slave can't accept commands as it keeps retaking the irq)
+    write8(&r8[0x23], 0);       // handler 32x clear on
+    burn10(10);
+    write16(&r[0x2c/4], 0);
+    burn10(10);
+    expect(ok, r16[0x2c/2], 0); // no pending vints
+    expect(ok, r16[0x2e/2], 0); // no exception_index
+    write8(r, 0x00); // FM=0
+    mem_barrier();
+    expect(ok, m_icnt[12/2], 0);
+    expect_range(ok, s_icnt[12/2], 0x10, 0x1000);
+
+    x32_cmd(CMD_SETSR, 0x10, 0, 0); // master unmask at sr
+    wait_next_vsync();
+    burn10(10);
+    expect(ok, r8 [0x2c], 12/2);
+    expect(ok, r8 [0x2d], 12/2);
+
+    x32_cmd(CMD_WRITE8, 0x20004001, 0, 0); // mask
+    x32_cmd(CMD_WRITE8, 0x20004001, 0, 1);
+    write16(&r[0x2c/4], 0);
+    wait_next_vsync();
+    burn10(10);
+    expect(ok, r16[0x2c/2], 0); // no pending vints
+    expect(ok, r16[0x2e/2], 0); // no exception_index
+
+    x32_cmd(CMD_WRITE8, 0x20004001, 8, 1); // slave unmask
+    burn10(10);
+    x32_cmd(CMD_WRITE8, 0x20004001, 0, 1); // mask
+    burn10(10);
+    expect(ok, r8 [0x2c], 0);
+    expect(ok, r8 [0x2d], 12/2);
+    write16(&r[0x2c/4], 0);
+
+    vdp_wait_for_line_0();
+    x32_cmd(CMD_WRITE8, 0x20004001, 8, 0); // master unmask
+    burn10(10);
+    x32_cmd(CMD_WRITE8, 0x20004001, 0, 0); // mask
+    burn10(10);
+    expect(ok, r8 [0x2c], 0);
+    expect(ok, r8 [0x2d], 0);
+
+    write8(&r8[0x23], 0);       // handler 32x clear on
+    write8(r, 0x00); // FM=0
+    mem_barrier();
+    expect(ok, m_icnt[12/2], 1);
+    for (i = 0; i < 8; i++) {
+        if (i == 12/2)
             continue;
         expect(ok, m_icnt[i], 0);
         expect(ok, s_icnt[i], 0);
@@ -2344,7 +2455,8 @@ static const struct {
     { T_32, t_32x_md_rom,          "32x md rom" },
     { T_32, t_32x_md_fb,           "32x md fb" },
     { T_32, t_32x_sh_fb,           "32x sh fb" },
-    { T_32, t_32x_irq,             "32x irq" },
+    { T_32, t_32x_irq_cmd,         "32x irq cmd" },
+    { T_32, t_32x_irq_vint,        "32x irq vint" },
     { T_32, t_32x_reg_w,           "32x reg w" },
     { T_32, t_32x_reset_prep,      "32x rstprep" }, // must be last 32x
 };
@@ -2467,6 +2579,7 @@ int main()
 
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD | VDP_MODE2_DMA | VDP_MODE2_DISP);
 
+    printf("%s\n", VERSION);
     have_32x = read32(0xa130ec) == MKLONG('M','A','R','S');
     en_32x = have_32x && (read16(0xa15100) & 1);
     v8 = read8(0xa10001);
@@ -2536,7 +2649,7 @@ int main()
         while (!(read16(VDP_CTRL_PORT) & SR_VB))
             write16(-4, read16(VDP_HV_COUNTER)); /* not blanking */;
     }
-#ifndef PICO
+#if 0 //ndef PICO
     // blank due to my lame tv being burn-in prone
     VDP_setReg(VDP_MODE2, VDP_MODE2_MD);
 #endif

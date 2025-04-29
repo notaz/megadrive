@@ -130,10 +130,14 @@ do_irq_cmn:
         mov.w   @r0, r1
         add     #1, r1
         mov.w   r1, @r0
+        mov.b   @(0x23, gbr), r0
+        cmp/eq  #0x5a, r0
+        bt      0f /* noack */
         mova    l_irq_ao, r0
         mov.w   @(r0, r2), r0
         stc     gbr, r1
-        mov.w   r0, @(r0, r1) /* ack */
+        mov.w   r0, @(r0, r1) /* 32x irq clear */
+0:
         mov     #0x80, r0
         mov.b   r0, @(0, gbr) /* FM=1 and flush writebuf (alt: ~20 nops) */
         mov.l   @r15+, r2
